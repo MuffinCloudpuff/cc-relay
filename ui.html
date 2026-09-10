@@ -305,7 +305,7 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">OPUS <em>ANTHROPIC_DEFAULT_OPUS_MODEL</em></span>
+        <span class="tier-label">explore代理 <em>ANTHROPIC_DEFAULT_OPUS_MODEL</em></span>
         <span class="hint">高价值, 值得</span>
         <div class="sel" data-kind="hb" data-tier="opus">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
@@ -323,7 +323,7 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">SONNET <em>ANTHROPIC_DEFAULT_SONNET_MODEL</em></span>
+        <span class="tier-label">审查代理 <em>ANTHROPIC_DEFAULT_SONNET_MODEL</em></span>
         <span class="hint">子代理省钱</span>
         <div class="sel" data-kind="hb" data-tier="sonnet">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
@@ -341,7 +341,7 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">FAST <em>ANTHROPIC_SMALL_FAST_MODEL</em></span>
+        <span class="tier-label">任务名称代理 <em>ANTHROPIC_SMALL_FAST_MODEL</em></span>
         <span class="hint">后台最便宜</span>
         <div class="sel" data-kind="hb" data-tier="fast">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
@@ -426,7 +426,7 @@ const TIERS=['main','opus','sonnet','fast','agent'];
 const MODEL_EFFORTS={
   // DeepSeek (Anthropic 兼容层: budget_tokens 被忽略, 只有 thinking 开关生效 -> 2 档)
   'deepseek-chat':              ['off','high'],
-  'deepseek-v4-flash':          ['off','high'],
+  'deepseek-flash':            ['off','high'],
   'deepseek-v4-pro':            ['off','high'],
   'deepseek-v4-flash-vision-exp':['off','high'],
   // Codex (GPT-5.6 API 支持 6 档; 界面档位数按模型: sol=5, luna=4, 其余按官方/推测)
@@ -480,7 +480,7 @@ function buildSel(sel, models, curModel, curEff){
 }
 function openSel(sel){
   $$('.sel-panel.open').forEach(p=>{if(p!==sel.querySelector('.sel-panel'))p.classList.remove('open')});
-  $$('.sel-btn.open').forEach(b=>{if(b!==sel.querySelector('.sel-btn'))b.classList.remove('open')});
+  $$('.sel-btn.open').forEach(b=>{if(b!==sel.querySelector('.sel-btn')){b.classList.remove('open');b.classList.remove('mode-eff')}});
   const panel=sel.querySelector('.sel-panel'),btn=sel.querySelector('.sel-btn');
   panel.classList.remove('model');          // 默认先出"选择强度"
   btn.classList.add('mode-eff');            // 按钮文字变"选择强度"
@@ -566,10 +566,10 @@ async function refresh(){
   $('#c-ds').classList.toggle('active-ds',ds);
   $('#c-hb').classList.toggle('active-hb',hb);
   $('#c-cx').classList.toggle('active-cx',cx);
-  buildSel($('#sel-ds'),models,ds?(saved||'deepseek-v4-flash'):'deepseek-v4-flash',st.effort||'medium');
+  buildSel($('#sel-ds'),models,ds?(saved||'deepseek-flash'):'deepseek-flash',st.effort||'medium');
   buildSel($('#sel-cx'),models,cx?(saved||'gpt-5.6-sol'):'gpt-5.6-sol',st.effort||'medium');
   const tiers=st.tiers||{},te=st.tier_efforts||{};
-  const def={main:'deepseek-v4-flash',opus:'gpt-5.6-sol',sonnet:'deepseek-v4-flash',fast:'deepseek-v4-flash',agent:'deepseek-v4-flash'};
+  const def={main:'deepseek-flash',opus:'gpt-5.6-sol',sonnet:'deepseek-flash',fast:'deepseek-flash',agent:'deepseek-flash'};
   TIERS.forEach(t=>{
     const sel=$('.sel[data-tier="'+t+'"]');
     buildSel(sel,models,tiers[t]||def[t],te[t]||st.effort||'medium');
@@ -584,7 +584,7 @@ async function refresh(){
   $('#routedot').className='dot on';
   $('#cur').innerHTML='Base: <b>http://127.0.0.1:8400</b> ｜ 上游: DeepSeek + Codex(8317) ｜ 假 key: <b>sk-relay-local-0000</b>';
 }
-const TIER_NAME={main:'主',opus:'OPUS',sonnet:'SONNET',fast:'FAST',agent:'plan代理'};
+const TIER_NAME={main:'主',opus:'explore代理',sonnet:'审查代理',fast:'任务名称代理',agent:'plan代理'};
 async function doSwitch(route,btnId,model){
   if(busy)return;busy=true;
   const btn=$(btnId);const old=btn.textContent;btn.disabled=true;btn.textContent='切换中…';

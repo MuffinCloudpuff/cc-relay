@@ -132,15 +132,16 @@ def codex_stop():
 
 CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.5",
                 "gpt-5.3-codex-spark"]
-DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"]
+DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 ALL_MODELS = DEEPSEEK_MODELS + CODEX_MODELS
 DEFAULT_CODEX_MAP = "gpt-5.6-sol"
-DEFAULT_DS_MAP = "deepseek-v4-flash"
+DEFAULT_DS_MAP = "deepseek-flash"
 # 推理强度 -> 请求 body 的 thinking 参数
 # 档位依据: GPT-5.6 API 支持 none/low/medium/high/xhigh/max; 经 CLIProxyAPI 转换后
 #   budget 阈值映射到 codex 的 reasoning effort(本地实测 xhigh/32768 触发思考 token)
 REASONING_MAP = {
     "off":     {"type": "disabled"},
+    "on":      {"type": "enabled"},
     "instant": {"type": "enabled", "budget_tokens": 512},
     "low":     {"type": "enabled", "budget_tokens": 2048},
     "medium":  {"type": "enabled", "budget_tokens": 8192},
@@ -149,7 +150,7 @@ REASONING_MAP = {
     "max":     {"type": "enabled", "budget_tokens": 65536},
 }
 EFFORT_VALUES = tuple(REASONING_MAP)
-REASONING_LABELS = {"off": "关闭", "instant": "即时", "low": "低", "medium": "中",
+REASONING_LABELS = {"off": "关闭", "on": "开启", "instant": "即时", "low": "低", "medium": "中",
                     "high": "高", "xhigh": "极高", "max": "最大"}
 _MODELS_CACHE = {"ts": 0, "ds": list(DEEPSEEK_MODELS), "cx": list(CODEX_MODELS)}
 
@@ -367,14 +368,14 @@ def stats_snapshot():
             'env_model': rt.get('model', '') or route,
             'codex_default_model': 'gpt-5.6-sol',
             'hybrid_codex_model': (rt.get('hybrid_codex_model') or rt.get('model') or '').strip() or 'gpt-5.6-sol',
-            'hybrid_deepseek_model': (rt.get('hybrid_deepseek_model') or '').strip() or 'deepseek-v4-flash',
+            'hybrid_deepseek_model': (rt.get('hybrid_deepseek_model') or '').strip() or 'deepseek-flash',
             # 五档位模型(hybrid): main/opus/sonnet/fast/agent(子代理)
             'tiers': {
-                'main':   (rt.get('tiers') or {}).get('main')   or (rt.get('hybrid_deepseek_model') or 'deepseek-v4-flash'),
+                'main':   (rt.get('tiers') or {}).get('main')   or (rt.get('hybrid_deepseek_model') or 'deepseek-flash'),
                 'opus':   (rt.get('tiers') or {}).get('opus')   or (rt.get('hybrid_codex_model') or 'gpt-5.6-sol'),
-                'sonnet': (rt.get('tiers') or {}).get('sonnet') or (rt.get('hybrid_deepseek_model') or 'deepseek-v4-flash'),
-                'fast':   (rt.get('tiers') or {}).get('fast')   or (rt.get('hybrid_deepseek_model') or 'deepseek-v4-flash'),
-                'agent':  (rt.get('tiers') or {}).get('agent')  or (rt.get('hybrid_deepseek_model') or 'deepseek-v4-flash'),
+                'sonnet': (rt.get('tiers') or {}).get('sonnet') or (rt.get('hybrid_deepseek_model') or 'deepseek-flash'),
+                'fast':   (rt.get('tiers') or {}).get('fast')   or (rt.get('hybrid_deepseek_model') or 'deepseek-flash'),
+                'agent':  (rt.get('tiers') or {}).get('agent')  or (rt.get('hybrid_deepseek_model') or 'deepseek-flash'),
             },
             # 环境变量名与档位对应(供 UI 展示)
             'tier_env': {
@@ -394,7 +395,7 @@ def stats_snapshot():
                 'fast':   ((rt.get('tier_efforts') or {}).get('fast')   or rt.get('effort') or 'medium'),
                 'agent':  ((rt.get('tier_efforts') or {}).get('agent')  or rt.get('effort') or 'medium'),
             },
-            'deepseek_profile': {'default_model': 'deepseek-v4-flash'},
+            'deepseek_profile': {'default_model': 'deepseek-flash'},
             'hybrid_pins': {'ANTHROPIC_DEFAULT_OPUS_MODEL': 'gpt-5.6-sol'},
             'proxy_running': codex_up(),
             'rows': rows, 'total': len(recs),
@@ -422,7 +423,7 @@ class Relay(BaseHTTPRequestHandler):
             names = []
             for n, u in (conf.get("upstreams") or {}).items():
                 pass
-            names = (["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp",
+            names = (["deepseek-flash", "deepseek-v4-pro",
                       "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.5",
                       "claude-opus-5", "claude-sonnet-5"])
             body = json.dumps({"data": [{"id": m, "object": "model", "owned_by": "relay"} for m in names],
