@@ -1,0 +1,33 @@
+# ── 密钥 / 凭证（绝对不能提交）──
+config.json
+codex-proxy/config.yaml
+codex-proxy/.proxy_key
+.proxy_key
+.cli-proxy-api/
+*.key
+*.pem
+
+# ── 运行时产物 ──
+records.jsonl
+*.jsonl
+!config.example.json
+old/
+__pycache__/
+*.pyc
+.watch.pid
+*.pid
+serve.log
+sentinel.log
+codex-proxy/*.log
+codex-proxy/proxy.*.log
+login.log
+
+# ── 大型二进制（自行下载）──
+codex-proxy/cli-proxy-api.exe
+*.exe
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

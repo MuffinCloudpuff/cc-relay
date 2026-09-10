@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CC Relay · Claude Code LLM 切换器</title>
+<style>
+  :root{
+    --bg:#0b0f17; --bg2:#0d1117; --card:#141b26; --card2:#1a2230;
+    --line:#232c3b; --line2:#30363d;
+    --fg:#e6edf3; --dim:#8b949e; --faint:#5c6773;
+    --ds:#4d9fff; --cx:#ff8a3d; --hb:#3fb950;
+    --red:#f85149; --amber:#d29922;
+    --ds-soft:rgba(77,159,255,.12); --cx-soft:rgba(255,138,61,.12); --hb-soft:rgba(63,185,80,.12);
+    --mono:Consolas,"Cascadia Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{min-height:100%}
+  body{
+    background:radial-gradient(1200px 500px at 15% -10%,rgba(77,159,255,.08),transparent 60%),
+               radial-gradient(1000px 500px at 90% -10%,rgba(255,138,61,.07),transparent 60%),
+               var(--bg);
+    color:var(--fg);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:34px 22px 60px}
+
+  /* ── 顶栏 ── */
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+  .logo{width:42px;height:42px;border-radius:12px;flex:none;
+        background:linear-gradient(135deg,var(--ds),var(--hb) 55%,var(--cx));
+        display:flex;align-items:center;justify-content:center;font-size:21px;
+        box-shadow:0 6px 20px -6px rgba(77,159,255,.45)}
+  .titles{flex:1;min-width:200px}
+  h1{font-size:19px;font-weight:700;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px;margin-top:3px}
+  .badges{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .badge{display:flex;align-items:center;gap:7px;font-size:12px;padding:7px 13px;border-radius:99px;
+         background:var(--card);border:1px solid var(--line);color:var(--dim)}
+  .badge b{color:var(--fg);font-weight:600}
+  .badge.route-hybrid{border-color:rgba(63,185,80,.4);color:var(--hb)}
+  .badge.route-deepseek{border-color:rgba(77,159,255,.4);color:var(--ds)}
+  .badge.route-codex{border-color:rgba(255,138,61,.4);color:var(--cx)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--red);flex:none}
+  .dot.on{background:var(--hb);box-shadow:0 0 8px var(--hb);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  /* ── 卡 ── */
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);
+        border-radius:16px;padding:20px 18px 18px;position:relative;z-index:0;transition:.18s;display:flex;flex-direction:column}
+  .card:hover{border-color:var(--line2);transform:translateY(-2px)}
+  /* 面板打开时把所在卡片提到最上层, 防止被下方卡片(尤其 hover transform 层叠)盖住 */
+  .card:has(.sel-panel.open){z-index:50}
+  .card .tag{position:absolute;top:-9px;right:14px;font-size:11px;padding:2px 11px;border-radius:99px;
+             background:var(--bg);border:1px solid var(--line);color:var(--dim);display:none;font-weight:600}
+  .card.active-ds{border-color:var(--ds);box-shadow:0 0 0 1px var(--ds),0 10px 34px -14px var(--ds)}
+  .card.active-cx{border-color:var(--cx);box-shadow:0 0 0 1px var(--cx),0 10px 34px -14px var(--cx)}
+  .card.active-hb{border-color:var(--hb);box-shadow:0 0 0 1px var(--hb),0 10px 34px -14px var(--hb)}
+  .card.active-ds .tag{display:inline-block;color:var(--ds);border-color:var(--ds)}
+  .card.active-cx .tag{display:inline-block;color:var(--cx);border-color:var(--cx)}
+  .card.active-hb .tag{display:inline-block;color:var(--hb);border-color:var(--hb)}
+  .cicon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+         font-size:19px;margin-bottom:11px;flex:none}
+  .cicon.ds{background:var(--ds-soft);box-shadow:inset 0 0 0 1px rgba(77,159,255,.25)}
+  .cicon.cx{background:var(--cx-soft);box-shadow:inset 0 0 0 1px rgba(255,138,61,.25)}
+  .cicon.hb{background:var(--hb-soft);box-shadow:inset 0 0 0 1px rgba(63,185,80,.25)}
+  .cname{font-size:15px;font-weight:700;margin-bottom:3px}
+  .cdesc{font-size:11.5px;color:var(--dim);line-height:1.65;flex:1}
+  .card .footbtn{display:block;width:100%;margin-top:13px;padding:9px;border:none;border-radius:9px;
+                 font-size:13px;font-weight:700;cursor:pointer;color:var(--fg);background:#212936;transition:.15s}
+  .card .footbtn:hover{filter:brightness(1.12)}
+  .card .footbtn:active{transform:scale(.98)}
+  .card .footbtn:disabled{opacity:.45;cursor:wait}
+  .card .footbtn.ds{background:var(--ds);color:#041c36}
+  .card .footbtn.cx{background:var(--cx);color:#33180a}
+  .card .footbtn.hb{background:var(--hb);color:#03260f}
+
+  /* ══ 模型选择器 (Codex 风格: 点击①出"选择强度"滑块 → 点模型名切"选择模型"列表) ══ */
+  .sel{position:relative;margin-top:14px}
+  .sel-btn{display:flex;align-items:center;gap:8px;background:#0e1420;border:1px solid var(--line2);
+           border-radius:10px;padding:8px 11px;cursor:pointer;transition:.15s;width:100%}
+  .sel-btn:hover{border-color:#3d4a5f}
+  .sel-btn.open{border-color:var(--hb);box-shadow:0 0 0 2px rgba(63,185,80,.14)}
+  .sel-model{flex:1;font-size:12.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
+  .sel-eff{font-size:10.5px;font-weight:700;color:var(--hb);background:var(--hb-soft);padding:2px 9px;border-radius:99px;flex:none}
+  .sel-select{flex:1;font-size:12.5px;color:var(--dim);display:none;text-align:left}
+  .sel-btn.mode-eff .sel-model,.sel-btn.mode-eff .sel-eff{display:none}
+  .sel-btn.mode-eff .sel-select{display:block}
+  .chev{font-size:10px;color:var(--faint);flex:none;transition:.15s}
+  .sel-btn.open .chev{transform:rotate(180deg);color:var(--hb)}
+  .sel-panel{display:none;position:absolute;top:calc(100% + 7px);left:0;width:min(300px,calc(100vw - 60px));
+             background:#0e1420;border:1px solid var(--line2);border-radius:12px;z-index:60;
+             box-shadow:0 18px 44px -12px rgba(0,0,0,.7);padding:9px;animation:pop .14s ease-out}
+  @keyframes pop{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
+  .sel-panel.open{display:block}
+  .view-effort{display:block}
+  .view-model{display:none}
+  .sel-panel.model .view-effort{display:none}
+  .sel-panel.model .view-model{display:block}
+  /* 视图1: 选择强度 */
+  .ve-head{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;cursor:pointer;transition:.12s}
+  .ve-head:hover{background:#1a2230}
+  .ve-eff{font-size:11px;font-weight:700;color:var(--hb);background:var(--hb-soft);padding:2px 9px;border-radius:99px}
+  .ve-model{flex:1;font-size:12.5px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
+  .ve-refresh{font-size:12px;color:var(--faint);cursor:pointer;flex:none}
+  .ve-refresh:hover{color:var(--fg)}
+  .ve-hint{font-size:9.5px;color:var(--faint);padding:0 9px 6px;display:flex;align-items:center;gap:5px}
+  .ve-slider{padding:4px 14px 12px}
+  .eff-rng{width:100%;accent-color:var(--hb);cursor:pointer;margin:0}
+  .eff-ticks{display:flex;justify-content:space-between;padding:3px 2px 0}
+  .eff-ticks span{width:5px;height:5px;border-radius:50%;background:#3a4658}
+  .eff-labels{display:flex;justify-content:space-between;padding:5px 2px 0;font-size:9.5px;color:var(--faint);font-family:var(--mono)}
+  /* 视图2: 选择模型 */
+  .vm-title{font-size:12.5px;font-weight:700;color:var(--fg);padding:7px 9px 3px}
+  .opt-list{max-height:210px;overflow:auto;margin-top:2px}
+  .opt-group{font-size:10px;color:var(--faint);padding:7px 9px 3px;letter-spacing:.5px;text-transform:uppercase}
+  .opt{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;cursor:pointer;
+       font-size:12.5px;font-family:var(--mono);color:var(--fg);transition:.08s}
+  .opt:hover{background:#1a2230}
+  .opt.cur{color:var(--hb);background:rgba(63,185,80,.07)}
+  .opt .tick{margin-left:auto;color:var(--hb);visibility:hidden;font-size:12px}
+  .opt.cur .tick{visibility:visible}
+
+  /* ── 混合卡 ── */
+  .card.hybrid{margin-top:14px}
+  .hb-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:4px}
+  .hb-head .cicon{margin-bottom:0}
+  .hb-head .hb-title{flex:1;padding-top:3px}
+  .hb-head .footbtn{width:auto;margin-top:0;padding:9px 26px;flex:none}
+  .hb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:6px}
+  .tier{background:#0e1420;border:1px solid var(--line);border-radius:13px;padding:13px 12px 12px;display:flex;flex-direction:column}
+  .tier .tier-label{font-size:11.5px;font-weight:600;color:var(--dim)}
+  .tier em{display:block;font-style:normal;font-size:9.5px;color:var(--faint);font-family:var(--mono);
+           margin-top:2px;letter-spacing:.2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tier .hint{display:block;font-size:10px;color:var(--faint);margin-top:2px;line-height:1.4}
+  .tier .sel{margin-top:10px}
+  .tier .sel-model,.tier .ve-model{font-size:11.5px}
+
+  /* ── 代理条 ── */
+  .proxybar{display:flex;align-items:center;gap:12px;margin-top:16px;background:var(--card);
+            border:1px solid var(--line);border-radius:14px;padding:13px 16px;font-size:13px;flex-wrap:wrap}
+  .proxybar .dot{width:10px;height:10px}
+  .proxybar .sp{flex:1;min-width:140px}
+  #ptxt{color:var(--dim)}
+  #ptxt b{color:var(--fg)}
+  .proxybar .grp{display:flex;gap:8px}
+  .pbtn{background:#212936;border:1px solid var(--line2);color:var(--fg);border-radius:8px;
+        padding:6px 15px;cursor:pointer;font-size:12px;transition:.15s}
+  .pbtn:hover{border-color:#3d4a5f;background:#26303f}
+  .pbtn:active{transform:scale(.97)}
+  .pbtn:disabled{opacity:.45;cursor:wait}
+
+  /* ── 流量 ── */
+  .traf{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 16px 13px}
+  .thead{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:13px;flex-wrap:wrap}
+  .thead .t{font-weight:700;font-size:14px}
+  .thead .sp{flex:1}
+  .thead button{background:transparent;border:1px solid var(--line2);color:var(--dim);border-radius:7px;
+                padding:4px 12px;cursor:pointer;font-size:11px;transition:.15s}
+  .thead button:hover{color:var(--fg);border-color:#3d4a5f}
+  .sums{display:flex;gap:22px;margin-bottom:12px;flex-wrap:wrap}
+  .sum{font-size:11.5px;color:var(--faint)}
+  .sum b{font-size:15px;font-weight:700;font-family:var(--mono);margin-left:5px;vertical-align:-1px}
+  .sum.ok b{color:var(--hb)} .sum.err b{color:var(--red)} .sum.req b{color:var(--fg)}
+  .tablewrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line)}
+  table.tf{width:100%;border-collapse:collapse;font-size:12px;min-width:520px}
+  table.tf th{color:var(--faint);font-weight:600;text-align:left;padding:8px 11px;
+              background:#101724;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.4px;white-space:nowrap}
+  table.tf td{padding:8px 11px;border-bottom:1px solid #1a2230;white-space:nowrap}
+  table.tf tbody tr:last-child td{border-bottom:none}
+  table.tf tbody tr{transition:.1s}
+  table.tf tbody tr:hover{background:#161e2b}
+  table.tf tr.hot td{background:rgba(63,185,80,.05)}
+  table.tf .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#30363d;margin-right:7px;vertical-align:1px}
+  table.tf .dot.on{background:var(--hb);box-shadow:0 0 6px var(--hb)}
+  table.tf .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .tagc{display:inline-block;font-size:10.5px;padding:2px 9px;border-radius:99px;font-weight:600}
+  .tagc.codex{background:var(--cx-soft);color:var(--cx)}
+  .tagc.deepseek{background:var(--ds-soft);color:var(--ds)}
+  .traf .none{color:var(--faint);font-size:12px;padding:18px 0;text-align:center}
+
+  /* ── 抓包查看器 ── */
+  .calls{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 16px 13px}
+  table.cl{width:100%;border-collapse:collapse;font-size:12px;min-width:560px}
+  table.cl th{color:var(--faint);font-weight:600;text-align:left;padding:7px 10px;background:#101724;
+              border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.4px;white-space:nowrap}
+  table.cl td{padding:6px 10px;border-bottom:1px solid #1a2230;white-space:nowrap}
+  table.cl tbody tr:last-child td{border-bottom:none}
+  table.cl tr[data-idx]{cursor:pointer;transition:.1s}
+  table.cl tr[data-idx]:hover{background:#161e2b}
+  table.cl .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .arrow{color:var(--faint)}
+  .mdl-out{color:var(--hb);font-weight:600}
+  .src{display:inline-block;font-size:10.5px;padding:2px 9px;border-radius:99px;font-weight:600}
+  .src.main{background:rgba(139,148,158,.14);color:var(--dim)}
+  .src.agent{background:var(--cx-soft);color:var(--cx)}
+  .detail{display:none;background:#0a0e15;border:1px solid var(--line);border-radius:9px;
+          padding:11px 13px;margin:4px 0 10px;font-size:11px;font-family:var(--mono);
+          white-space:pre-wrap;word-break:break-all;max-height:440px;overflow:auto;color:var(--dim);line-height:1.65}
+  .detail.show{display:block}
+
+  /* ── 底部 / toast ── */
+  .foot{font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.9;font-family:var(--mono)}
+  .foot b{color:var(--dim)}
+  .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(90px);
+         background:#1f6f37;color:#fff;padding:11px 24px;border-radius:11px;font-size:13px;
+         opacity:0;transition:.28s cubic-bezier(.2,.8,.3,1);pointer-events:none;box-shadow:0 10px 30px -8px rgba(0,0,0,.5);z-index:99}
+  .toast.err{background:#b62324}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  @media(max-width:980px){ .hb-grid{grid-template-columns:1fr 1fr} }
+  @media(max-width:880px){ .row2{grid-template-columns:1fr} }
+  @media(max-width:520px){ .hb-grid{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🦀</div>
+    <div class="titles">
+      <h1>CC Relay · Claude Code LLM 切换器</h1>
+      <div class="sub">路由即时生效 · 运行中的 claude 下一个请求就走新路由</div>
+    </div>
+    <div class="badges">
+      <div class="badge" id="bd-route"><span class="dot" id="routedot"></span>路由 <b id="routetxt">…</b></div>
+      <div class="badge"><span class="dot" id="pdot"></span>代理 <b id="ptxt2">检查…</b></div>
+    </div>
+  </header>
+
+  <!-- 第一行: DeepSeek / Codex -->
+  <div class="row2">
+    <div class="card" id="c-ds">
+      <div class="tag">当前</div>
+      <div class="cicon ds">🔵</div>
+      <div class="cname">DeepSeek 直连</div>
+      <div class="cdesc">全部请求直连 api.deepseek.com<br>不需要代理 / 不需要 clash</div>
+      <div class="sel" id="sel-ds" data-kind="ds" data-global="1">
+        <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+        <div class="sel-panel">
+          <div class="view-effort">
+            <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+            <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+            <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+          </div>
+          <div class="view-model">
+            <div class="vm-title">选择模型</div>
+            <div class="opt-list"></div>
+          </div>
+        </div>
+      </div>
+      <button class="footbtn ds" id="b-ds">切换到此模式</button>
+    </div>
+    <div class="card" id="c-cx">
+      <div class="tag">当前</div>
+      <div class="cicon cx">🟠</div>
+      <div class="cname">Codex 全量</div>
+      <div class="cdesc">全部请求走 GPT 模型（默认 Sol）<br>经本地代理 + clash</div>
+      <div class="sel" id="sel-cx" data-kind="cx" data-global="1">
+        <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+        <div class="sel-panel">
+          <div class="view-effort">
+            <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+            <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+            <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+          </div>
+          <div class="view-model">
+            <div class="vm-title">选择模型</div>
+            <div class="opt-list"></div>
+          </div>
+        </div>
+      </div>
+      <button class="footbtn cx" id="b-cx">切换到此模式</button>
+    </div>
+  </div>
+
+  <!-- 第二行: 混合整行 · 四档, 每档独立模型 + 独立强度(挡位随模型适配) -->
+  <div class="card hybrid" id="c-hb">
+    <div class="tag">当前</div>
+    <div class="hb-head">
+      <div class="cicon hb">🟢</div>
+      <div class="hb-title">
+        <div class="cname">混合（默认）</div>
+        <div class="cdesc">按 CC 五档位分发 · 每档独立选模型 + 独立推理强度 · 强度挡位随所选模型自动适配</div>
+      </div>
+      <button class="footbtn hb" id="b-hb">切换到此模式</button>
+    </div>
+    <div class="hb-grid">
+      <div class="tier">
+        <span class="tier-label">主模型 <em>ANTHROPIC_MODEL</em></span>
+        <span class="hint">日常主力, 便宜快</span>
+        <div class="sel" data-kind="hb" data-tier="main">
+          <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+          <div class="sel-panel">
+            <div class="view-effort">
+              <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+              <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+              <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+            </div>
+            <div class="view-model">
+              <div class="vm-title">选择模型</div>
+              <div class="opt-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tier">
+        <span class="tier-label">OPUS <em>ANTHROPIC_DEFAULT_OPUS_MODEL</em></span>
+        <span class="hint">高价值, 值得</span>
+        <div class="sel" data-kind="hb" data-tier="opus">
+          <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+          <div class="sel-panel">
+            <div class="view-effort">
+              <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+              <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+              <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+            </div>
+            <div class="view-model">
+              <div class="vm-title">选择模型</div>
+              <div class="opt-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tier">
+        <span class="tier-label">SONNET <em>ANTHROPIC_DEFAULT_SONNET_MODEL</em></span>
+        <span class="hint">子代理省钱</span>
+        <div class="sel" data-kind="hb" data-tier="sonnet">
+          <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+          <div class="sel-panel">
+            <div class="view-effort">
+              <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+              <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+              <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+            </div>
+            <div class="view-model">
+              <div class="vm-title">选择模型</div>
+              <div class="opt-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tier">
+        <span class="tier-label">FAST <em>ANTHROPIC_SMALL_FAST_MODEL</em></span>
+        <span class="hint">后台最便宜</span>
+        <div class="sel" data-kind="hb" data-tier="fast">
+          <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+          <div class="sel-panel">
+            <div class="view-effort">
+              <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+              <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+              <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+            </div>
+            <div class="view-model">
+              <div class="vm-title">选择模型</div>
+              <div class="opt-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tier">
+        <span class="tier-label">plan代理 <em>ANTHROPIC_MODEL·子代理</em></span>
+        <span class="hint">Claude Agent SDK · model=本地中转 单独分流</span>
+        <div class="sel" data-kind="hb" data-tier="agent">
+          <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
+          <div class="sel-panel">
+            <div class="view-effort">
+              <div class="ve-head"><span class="ve-eff">中</span><span class="ve-model">—</span><span class="ve-refresh" title="切换模型">↻</span></div>
+              <div class="ve-hint">点击模型名可切换模型 · 拖动调节推理强度</div>
+              <div class="ve-slider"><input type="range" class="eff-rng" min="0" max="2" step="1"><div class="eff-ticks"></div><div class="eff-labels"></div></div>
+            </div>
+            <div class="view-model">
+              <div class="vm-title">选择模型</div>
+              <div class="opt-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="proxybar">
+    <span class="dot" id="pdot2"></span>
+    <span class="sp" id="ptxt">检查代理…</span>
+    <div class="grp">
+      <button class="pbtn" id="b-pstart">启动代理</button>
+      <button class="pbtn" id="b-pstop">停止代理</button>
+    </div>
+  </div>
+
+  <div class="traf" id="traf">
+    <div class="thead">
+      <span class="t">📊 实时模型流量</span>
+      <span id="tf-since" style="color:var(--faint);font-size:11px"></span>
+      <span class="sp"></span>
+      <button id="b-treset">清零</button>
+    </div>
+    <div class="sums">
+      <span class="sum req">请求<b id="sum-req">0</b></span>
+      <span class="sum ok">成功<b id="sum-ok">0</b></span>
+      <span class="sum err">失败<b id="sum-err">0</b></span>
+    </div>
+    <div class="tablewrap"><div id="tf-body"><div class="none">暂无请求…（用 claude 干活后这里会实时滚动）</div></div></div>
+  </div>
+
+  <div class="calls">
+    <div class="thead">
+      <span class="t">🔍 抓包查看器</span>
+      <span style="color:var(--faint);font-size:11px">CC 发了什么 → 我们选了谁转发（点行看详情）</span>
+      <span class="sp"></span>
+      <button id="b-crefresh">刷新</button>
+    </div>
+    <div class="tablewrap"><div id="cl-body"><div class="none" style="color:var(--faint);padding:18px 0;text-align:center">暂无调用…</div></div></div>
+  </div>
+
+  <div class="foot" id="cur"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const $$=s=>document.querySelectorAll(s);
+const EFFORT_CN={off:'关',instant:'即时',low:'低',medium:'中',high:'高',xhigh:'极高',max:'最大'};
+const TIERS=['main','opus','sonnet','fast','agent'];
+// 各模型支持的推理强度挡位 (按模型适配: Codex 侧 sol=5 档/luna=4 档, DeepSeek 兼容层只认 关/开)
+const MODEL_EFFORTS={
+  // DeepSeek (Anthropic 兼容层: budget_tokens 被忽略, 只有 thinking 开关生效 -> 2 档)
+  'deepseek-chat':              ['off','high'],
+  'deepseek-v4-flash':          ['off','high'],
+  'deepseek-v4-pro':            ['off','high'],
+  'deepseek-v4-flash-vision-exp':['off','high'],
+  // Codex (GPT-5.6 API 支持 6 档; 界面档位数按模型: sol=5, luna=4, 其余按官方/推测)
+  'gpt-6-astra':                ['instant','medium','high','xhigh','max'], // 5 档 (同 Sol, GPT-6 Pro=最高档)
+  'gpt-5.6-sol':                ['instant','medium','high','xhigh','max'], // 5 档: 即时/中/高/极高/Pro
+  'gpt-5.6-terra':              ['instant','medium','high','xhigh'],       // 4 档 (Codex 选择器 Light/Med/High/Extra)
+  'gpt-5.6-luna':               ['instant','medium','high','xhigh'],       // 4 档: 即时/中/高/极高
+  'gpt-5.5':                    ['low','medium','high','xhigh'],           // 4 档 (上一代旗舰)
+  'gpt-5.3-codex-spark':        ['low','high'],                            // 2 档 (实时模型, 档位固定)
+};
+const DEFAULT_EFFORTS=['instant','medium','high','xhigh'];
+const effortsFor=m=>MODEL_EFFORTS[m]||DEFAULT_EFFORTS;
+let st=null,busy=false;
+function toast(msg,err){const t=$('#toast');t.textContent=msg;t.className='toast show'+(err?' err':'');clearTimeout(t._h);t._h=setTimeout(()=>t.className='toast',2400)}
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json()}
+const noJunk=m=>m&&!m.startsWith('gpt-image')&&m!=='codex-auto-review';
+const isCodex=m=>m&&m.startsWith('gpt-')&&!m.startsWith('gpt-image')&&m!=='codex-auto-review';
+const escHtml=s=>(s==null?'-':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// ── Codex 风格选择器: 点击①出"选择强度"滑块 → 点模型名切"选择模型"列表 ──
+function buildSel(sel, models, curModel, curEff){
+  const btn=sel.querySelector('.sel-btn');
+  const ve=sel.querySelector('.view-effort');
+  // 强度挡位按当前模型适配; 若当前档位不在该模型档位表, 落到 0 并让显示跟随滑块
+  const effs=effortsFor(curModel);
+  let idx=effs.indexOf(curEff);
+  if(idx<0)idx=Math.min(sel.dataset.pidx?parseInt(sel.dataset.pidx):0,effs.length-1);
+  const eff=effs[idx];
+  sel.dataset.pidx=String(idx);
+  btn.querySelector('.sel-model').textContent=curModel||'—';
+  btn.querySelector('.sel-eff').textContent=EFFORT_CN[eff]||eff;
+  ve.querySelector('.ve-eff').textContent=EFFORT_CN[eff]||eff;
+  ve.querySelector('.ve-model').textContent=curModel||'—';
+  const rng=ve.querySelector('.eff-rng');
+  rng.min=0;rng.max=effs.length-1;rng.step=1;
+  rng.value=idx;
+  const ticks=ve.querySelector('.eff-ticks');ticks.innerHTML='';
+  for(let i=0;i<effs.length;i++)ticks.appendChild(document.createElement('span'));
+  const labs=ve.querySelector('.eff-labels');labs.innerHTML='';
+  labs.innerHTML=effs.map(e=>'<span>'+EFFORT_CN[e]+'</span>').join('');
+  // 模型列表
+  const ol=sel.querySelector('.opt-list');ol.innerHTML='';
+  const groups=[['DeepSeek',(models.ds||[]).filter(noJunk)],['Codex',(models.cx||[]).filter(isCodex)]];
+  let html='';
+  for(const[gname,gmodels]of groups){
+    if(!gmodels.length)continue;
+    html+='<div class="opt-group">'+gname+'</div>';
+    gmodels.forEach(m=>{html+='<div class="opt'+(m===curModel?' cur':'')+'" data-m="'+escHtml(m)+'">'+escHtml(m)+(m===curModel?'<span class="tick">✓</span>':'')+'</div>'});
+  }
+  ol.innerHTML=html;
+}
+function openSel(sel){
+  $$('.sel-panel.open').forEach(p=>{if(p!==sel.querySelector('.sel-panel'))p.classList.remove('open')});
+  $$('.sel-btn.open').forEach(b=>{if(b!==sel.querySelector('.sel-btn'))b.classList.remove('open')});
+  const panel=sel.querySelector('.sel-panel'),btn=sel.querySelector('.sel-btn');
+  panel.classList.remove('model');          // 默认先出"选择强度"
+  btn.classList.add('mode-eff');            // 按钮文字变"选择强度"
+  panel.classList.add('open');btn.classList.add('open');
+}
+function closeSel(sel){
+  const panel=sel.querySelector('.sel-panel'),btn=sel.querySelector('.sel-btn');
+  panel.classList.remove('open','model');btn.classList.remove('open','mode-eff');
+}
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.sel')){$$('.sel-panel.open').forEach(p=>p.classList.remove('open','model'));$$('.sel-btn.open').forEach(b=>b.classList.remove('open','mode-eff'))}
+});
+$$('.sel').forEach(sel=>{
+  // 按钮: 展开 (先出强度视图)
+  sel.querySelector('.sel-btn').addEventListener('click',e=>{
+    e.stopPropagation();
+    const p=sel.querySelector('.sel-panel');
+    if(p.classList.contains('open'))closeSel(sel);else openSel(sel);
+  });
+  // 强度视图头部 (强度 模型 ↻): 点击切到模型列表
+  sel.querySelector('.ve-head').addEventListener('click',e=>{
+    if(e.target.classList.contains('ve-refresh'))return;
+    e.stopPropagation();
+    sel.querySelector('.sel-panel').classList.add('model');
+    sel.querySelector('.sel-btn').classList.remove('mode-eff');
+  });
+  // 强度滑块: 实时标签 + 松开保存
+  const rng=sel.querySelector('.eff-rng');
+  const ve=sel.querySelector('.view-effort');
+  const setVal=()=>{
+    const effs=effortsFor(ve.querySelector('.ve-model').textContent);
+    const v=effs[rng.value];
+    sel.dataset.pidx=String(rng.value);
+    ve.querySelector('.ve-eff').textContent=EFFORT_CN[v]||v;
+    return v;
+  };
+  rng.addEventListener('input',()=>{setVal()});
+  rng.addEventListener('change',async()=>{
+    const kind=sel.dataset.kind,tier=sel.dataset.tier;
+    const effs=effortsFor(ve.querySelector('.ve-model').textContent);
+    const v=effs[rng.value]||'medium';
+    sel.dataset.pidx=String(rng.value);
+    sel.querySelector('.sel-btn .sel-eff').textContent=EFFORT_CN[v]||v;  // 按钮即时更新
+    const body={};
+    if(kind==='hb'){body.route='hybrid';body.tier_efforts={};body.tier_efforts[tier]=v;}
+    else{body.route=(st&&st.route)||'hybrid';body.effort=v;}
+    try{
+      const r=await api('/api/route',body);
+      if(r.error){toast('失败: '+r.error,true);await refresh();return}
+      toast((kind==='hb'?(TIER_NAME[tier]||tier)+'档':(kind==='ds'?'DeepSeek':'Codex'))+' 强度: '+v);
+    }catch(err){toast('请求失败: '+err,true);await refresh()}
+  });
+  // 选模型: 保存 + 切回强度视图 (滑块挡位随新模型适配) — 本地即时更新, 不整页刷新
+  sel.querySelector('.opt-list').addEventListener('click',async e=>{
+    const opt=e.target.closest('.opt');if(!opt)return;
+    const kind=sel.dataset.kind,tier=sel.dataset.tier;
+    const model=opt.dataset.m;
+    const body={};
+    if(kind==='hb'){body.route='hybrid';body.tiers={};body.tiers[tier]=model;}
+    else{body.route=kind==='ds'?'deepseek':'codex';body.model=model;}
+    // 先本地切换视图/模型/挡位 (即时响应)
+    const panel=sel.querySelector('.sel-panel'),btn=sel.querySelector('.sel-btn');
+    const v=effortsFor(model)[sel.dataset.pidx?parseInt(sel.dataset.pidx):0]||effortsFor(model)[0];
+    btn.querySelector('.sel-model').textContent=model;
+    btn.querySelector('.sel-eff').textContent=EFFORT_CN[v]||v;
+    panel.classList.remove('model');btn.classList.add('mode-eff');
+    buildSel(sel,{ds:(st&&st.models_ds)||[],cx:(st&&st.models_codex)||[]},model,v);
+    try{
+      const r=await api('/api/route',body);
+      if(r.error){toast('失败: '+r.error,true);await refresh();return}
+      toast((kind==='hb'?(TIER_NAME[tier]||tier)+'档':(kind==='ds'?'DeepSeek':'Codex'))+' → '+model);
+    }catch(err){toast('请求失败: '+err,true);await refresh()}
+  });
+});
+
+// ── 状态刷新 ──
+async function refresh(){
+  st=await api('/api/status');
+  const route=st.route||st.mode||'hybrid';
+  const ds=route==='deepseek',hb=route==='hybrid',cx=route==='codex';
+  const models={ds:(st.models_ds||[]),cx:(st.models_codex||[])};
+  const saved=st.model||'';
+  $('#c-ds').classList.toggle('active-ds',ds);
+  $('#c-hb').classList.toggle('active-hb',hb);
+  $('#c-cx').classList.toggle('active-cx',cx);
+  buildSel($('#sel-ds'),models,ds?(saved||'deepseek-v4-flash'):'deepseek-v4-flash',st.effort||'medium');
+  buildSel($('#sel-cx'),models,cx?(saved||'gpt-5.6-sol'):'gpt-5.6-sol',st.effort||'medium');
+  const tiers=st.tiers||{},te=st.tier_efforts||{};
+  const def={main:'deepseek-v4-flash',opus:'gpt-5.6-sol',sonnet:'deepseek-v4-flash',fast:'deepseek-v4-flash',agent:'deepseek-v4-flash'};
+  TIERS.forEach(t=>{
+    const sel=$('.sel[data-tier="'+t+'"]');
+    buildSel(sel,models,tiers[t]||def[t],te[t]||st.effort||'medium');
+  });
+  const run=!!st.proxy_running;
+  $('#pdot').className='dot'+(run?' on':'');$('#pdot2').className='dot'+(run?' on':'');
+  $('#ptxt2').textContent=run?'运行中':'未运行';
+  $('#ptxt').innerHTML=run?'本地代理运行中 <b>127.0.0.1:8317</b>':'本地代理未运行 —— 混合 / Codex 模式需要它';
+  const rb=$('#bd-route');rb.className='badge route-'+route;
+  const rt={'hybrid':'混合 · '+((tiers.main||'DS'))+' / '+(tiers.opus||'Sol'),'deepseek':'DeepSeek 直连 · '+(saved||'默认'),'codex':'Codex 全量 · '+(saved||'gpt-5.6-sol')}[route]||route;
+  $('#routetxt').textContent=rt;
+  $('#routedot').className='dot on';
+  $('#cur').innerHTML='Base: <b>http://127.0.0.1:8400</b> ｜ 上游: DeepSeek + Codex(8317) ｜ 假 key: <b>sk-relay-local-0000</b>';
+}
+const TIER_NAME={main:'主',opus:'OPUS',sonnet:'SONNET',fast:'FAST',agent:'plan代理'};
+async function doSwitch(route,btnId,model){
+  if(busy)return;busy=true;
+  const btn=$(btnId);const old=btn.textContent;btn.disabled=true;btn.textContent='切换中…';
+  try{
+    const r=await api('/api/route',{route,model:model||''});
+    if(r.error){toast('失败: '+r.error,true);return}
+    toast('已切换: '+({deepseek:'DeepSeek 直连',hybrid:'混合',codex:'Codex 全量'}[route]||route)+(model?' · '+model:''));
+    await refresh();
+  }catch(e){toast('请求失败: '+e,true)}
+  finally{btn.disabled=false;btn.textContent=old;busy=false}
+}
+$('#b-ds').onclick=()=>doSwitch('deepseek','#b-ds',$('#sel-ds .sel-model').textContent==='—'?'':$('#sel-ds .sel-model').textContent);
+$('#b-cx').onclick=()=>doSwitch('codex','#b-cx',$('#sel-cx .sel-model').textContent==='—'?'':$('#sel-cx .sel-model').textContent);
+$('#b-hb').onclick=async()=>{
+  if(busy)return;busy=true;
+  const btn=$('#b-hb');const old=btn.textContent;btn.disabled=true;btn.textContent='切换中…';
+  try{
+    const tiers={};
+    TIERS.forEach(t=>{tiers[t]=$('.sel[data-tier="'+t+'"] .sel-model').textContent});
+    const r=await api('/api/route',{route:'hybrid',tiers});
+    if(r.error){toast('失败: '+r.error,true);return}
+    toast('已切换: 混合 · '+tiers.main+' / '+tiers.opus+' / '+tiers.sonnet+' / '+tiers.fast);
+    await refresh();
+  }catch(e){toast('请求失败: '+e,true)}
+  finally{btn.disabled=false;btn.textContent=old;busy=false}
+};
+$('#b-pstart').onclick=async()=>{await api('/api/proxy',{action:'start'});await refresh()};
+$('#b-pstop').onclick=async()=>{await api('/api/proxy',{action:'stop'});await refresh()};
+async function loadTraffic(){
+  try{
+    const t=await api('/api/status');
+    const rows=t.rows||[];
+    $('#tf-since').textContent='代理 '+(t.codex_up?'运行中':'未运行');
+    const body=$('#tf-body');
+    const req=rows.reduce((a,r)=>a+(r.req||0),0);
+    const ok=rows.reduce((a,r)=>a+(r.ok||0),0);
+    const err=rows.reduce((a,r)=>a+(r.err||0),0);
+    $('#sum-req').textContent=req;$('#sum-ok').textContent=ok;$('#sum-err').textContent=err;
+    if(!rows.length){body.innerHTML='<div class="none">暂无请求…（用 claude 干活后这里会实时滚动）</div>';return}
+    let html='<table class="tf"><thead><tr><th>上游</th><th>实际模型</th><th style="text-align:right">请求</th><th style="text-align:right">成功</th><th style="text-align:right">失败</th><th>最近请求</th></tr></thead><tbody>';
+    for(const r of rows){
+      html+='<tr class="'+(r.err?'':'hot')+'"><td><span class="dot'+(r.err?'':' on')+'"></span><span class="tagc '+(r.route==='codex'?'codex':'deepseek')+'">'+escHtml(r.route)+'</span></td>'+
+        '<td class="mono">'+escHtml(r.model)+'</td>'+
+        '<td class="mono" style="text-align:right">'+r.req+'</td><td class="mono" style="text-align:right;color:var(--hb)">'+r.ok+'</td>'+
+        '<td class="mono" style="text-align:right;color:'+(r.err?'#f85149':'var(--faint)')+'">'+r.err+'</td>'+
+        '<td style="color:var(--faint)">#'+r.last+'</td></tr>';
+    }
+    html+='</tbody></table>';
+    body.innerHTML=html;
+  }catch(e){}
+}
+$('#b-treset').onclick=async()=>{await api('/api/reset',{});await loadTraffic();loadCalls()};
+
+// ── 抓包查看器 (展开状态跨轮询保持) ──
+const _dc={};
+async function loadCalls(){
+  const open=[];
+  document.querySelectorAll('#cl-body .detail.show').forEach(el=>{const i=el.id.slice(3);if(i&&!open.includes(i))open.push(i)});
+  try{
+    const d=await api('/api/calls?n=500');
+    const calls=(d.calls||[]).slice().reverse();
+    const body=$('#cl-body');
+    if(!calls.length){body.innerHTML='<div class="none" style="color:var(--faint);padding:18px 0;text-align:center">暂无调用…</div>';return}
+    let html='<table class="cl"><thead><tr><th>时间</th><th>CC 发出</th><th></th><th>选中转发</th><th>上游</th><th>规则</th><th>状态</th><th>来源</th></tr></thead><tbody>';
+    for(const c of calls){
+      const rel=(c.route_reason||'').replace('hybrid:','h:').replace('route:','r:');
+      const cst=c.status||0;
+      html+='<tr data-idx="'+c.idx+'"><td style="color:var(--faint)">'+escHtml((c.ts||'').slice(11))+'</td>'+
+        '<td class="mono">'+escHtml(c.orig_model)+'</td>'+
+        '<td class="arrow">→</td>'+
+        '<td class="mono mdl-out">'+escHtml(c.sent_model)+'</td>'+
+        '<td><span class="tagc '+(c.route==='codex'?'codex':'deepseek')+'">'+escHtml(c.route)+'</span></td>'+
+        '<td style="color:var(--faint)">'+escHtml(rel)+'</td>'+
+        '<td class="mono" style="color:'+(cst<400?'var(--hb)':'var(--red)')+'">'+cst+'</td>'+
+        '<td>'+(c.agent_id?'<span class="src agent">子代理</span>':'<span class="src main">主循环</span>')+'</td></tr>';
+      html+='<tr><td colspan="8" style="padding:0;border:none"><div class="detail" id="dt-'+c.idx+'"></div></td></tr>';
+    }
+    html+='</tbody></table>';
+    body.innerHTML=html;
+    body.querySelectorAll('tr[data-idx]').forEach(tr=>tr.onclick=()=>toggleDetail(tr.dataset.idx));
+    open.forEach(i=>{
+      const el=$('#dt-'+i);if(!el)return;
+      const c=_dc[i];
+      if(c&&c.html){el.innerHTML=c.html;el.classList.add('show')}
+      else{el.textContent='加载中…';el.classList.add('show');toggleDetail(i)}
+    });
+  }catch(e){}
+}
+async function toggleDetail(idx){
+  const el=$('#dt-'+idx);if(!el)return;
+  if(el.classList.contains('show')){el.classList.remove('show');return}
+  const cached=_dc[idx];
+  if(cached&&cached.html){el.innerHTML=cached.html;el.classList.add('show');return}
+  el.textContent='加载中…';el.classList.add('show');
+  try{
+    const r=await api('/api/call?idx='+idx);
+    const b=r.body||{};
+    const hd=Object.entries(r.headers||{}).filter(([k])=>!k.startsWith('X-Stainless')).map(([k,v])=>k+': '+String(v).slice(0,90)).join('\n');
+    const sys=b.system?JSON.stringify(b.system).slice(0,600):'(无)';
+    const msgs=(b.messages||[]).map((m,i)=>{let t='';if(typeof m.content==='string')t=m.content;else if(Array.isArray(m.content))t=m.content.map(x=>x.type==='text'?x.text:(x.type==='tool_use'?'[tool_use '+x.name+']':x.type==='tool_result'?'[tool_result]':'['+x.type+']')).join(' ');return '  ['+i+'] '+m.role+': '+String(t).slice(0,200)}).join('\n');
+    const agentId=(r.headers&&r.headers['x-claude-code-agent-id'])||'(无 = 主循环)';
+    const text=
+      'idx #'+r.idx+'   '+r.ts+'   '+r.path+'\n'+
+      'CC 发出模型  : '+r.orig_model+'\n'+
+      '选中转发模型 : '+r.sent_model+'\n'+
+      '上游 / 规则  : '+r.route+'  /  '+r.route_reason+'\n'+
+      '状态码       : '+r.resp_status+'\n'+
+      '子代理 ID    : '+agentId+'\n'+
+      '会话 ID      : '+((r.headers&&r.headers['X-Claude-Code-Session-Id'])||'-')+'\n'+
+      '\n--- 请求 headers ---\n'+hd+'\n'+
+      '\n--- system (前600) ---\n'+sys+'\n'+
+      '\n--- messages ('+(b.messages||[]).length+') ---\n'+msgs+'\n'+
+      '\n--- 响应 (前800) ---\n'+String(r.resp_body||'').slice(0,800);
+    el.textContent=text;
+    _dc[idx]={html:text};
+  }catch(e){el.textContent='加载失败: '+e}
+}
+$('#b-crefresh').onclick=loadCalls;
+
+refresh();setInterval(refresh,4000);loadTraffic();setInterval(loadTraffic,3000);loadCalls();setInterval(loadCalls,5000);
+</script>
+</body>
+</html>
