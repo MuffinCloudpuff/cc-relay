@@ -119,7 +119,21 @@ copy config.example.json config.json
 
 ### 5.1 放 wrapper
 
-新建目录 `C:\Users\<你>\bin`，在里面存一个 `claude.cmd`（**必须 ASCII 内容 + CRLF 换行**）：
+仓库里自带模板：**`wrapper\claude.cmd`**（ASCII + CRLF，已写好）。
+
+**最省事的做法（零改动）**：不复制、不改文件，直接把项目里的 `wrapper` 目录加到 PATH 最前面 —— wrapper 用 `%~dp0..` 自动定位到项目根目录。
+
+```bat
+:: 例：项目在 C:\cc-relay，就把 C:\cc-relay\wrapper 排到 PATH 最前
+```
+
+**或者**把 `wrapper\claude.cmd` 复制到你自己的 bin 目录（如 `C:\Users\<你>\bin\`），并把文件里的这一行改成实际项目路径：
+
+```bat
+if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=C:\cc-relay"
+```
+
+模板内容（照抄也行，**必须 ASCII 内容 + CRLF 换行**）：
 
 ```bat
 @echo off
@@ -131,7 +145,7 @@ rem  bypass: set CLAUDE_SKIP_AUTO=1
 rem ============================================================
 setlocal
 if "%CLAUDE_SKIP_AUTO%"=="1" goto run
-if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=%~dp0..\cc-relay"
+if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=%~dp0.."
 python "%CC_RELAY_DIR%\lifecycle.py" autostart
 set RC=%errorlevel%
 if %RC%==0 start "" "http://127.0.0.1:8610"
@@ -140,15 +154,9 @@ start "" pythonw "%CC_RELAY_DIR%\lifecycle.py" watch
 call "%APPDATA%\npm\claude.cmd" %*
 ```
 
-改一行就够：把 `set "CC_RELAY_DIR=%~dp0..\cc-relay"` 改成你的实际项目路径，例如：
-
-```bat
-if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=C:\cc-relay"
-```
-
-> `CC_RELAY_DIR` 也可以用 `setx` 设成环境变量，wrapper 会优先用它。
-> `%~dp0` 是 wrapper 自己所在目录；上面默认值假定 wrapper 放在项目目录的**同级**（如 wrapper 在 `C:\bin\`、项目在 `C:\cc-relay\`）。不确定就直接写绝对路径。
-> `CLAUDE_SKIP_AUTO=1` 时跳过全部自动流程，直接调用真 CLI。
+- `%~dp0` 是 wrapper 自己所在目录；`%~dp0..` = 它的上一级（模板放在项目的 `wrapper\` 里，正好是项目根）
+- `python` / `pythonw` 需要在 PATH 里；极端情况下可换成绝对路径
+- 想临时绕过整套自动流程：`set CLAUDE_SKIP_AUTO=1` 后再敲 `claude`
 
 ### 5.2 让这个目录排在 PATH 前面
 

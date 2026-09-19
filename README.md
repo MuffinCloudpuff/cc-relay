@@ -59,6 +59,7 @@ Claude Code ──(假 sk)──▶ cc-relay :8400 ──┬──▶ DeepSeek A
 | `config.example.json` | 配置模板（复制为 `config.json` 后填真实值） |
 | `codex-proxy/` | CLIProxyAPI 反代（官方程序需自行下载，见下） |
 | `INSTALL.md` | **面向新用户的 Windows 安装说明**（含 `claude` 自启动、混合模式配置、API 配置、排错） |
+| `wrapper/claude.cmd` | 自启动 wrapper 模板：敲 `claude` 自动拉起中转+UI，最后一个 CC 退出后自动停 |
 
 ---
 
