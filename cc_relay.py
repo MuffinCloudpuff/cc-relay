@@ -225,6 +225,77 @@ def _is_subagent(headers, body_json):
         return False
 
 
+# ---------- CC 指纹清理 (主模型档开关) ----------
+CC_ID_PAT = r"You are Claude Code,?\s*Anthropic's official CLI for Claude\.?"
+CC_BILLING_PREFIX = "x-anthropic-billing-header:"
+
+
+def _strip_cc_fingerprint(body):
+    """删除 system 里的 CC 身份句与 billing 指纹块, 返回 (新 body, 删除块数)
+    - 整块命中 -> 整块丢弃; 句子混在别的文本里 -> 只摘句子
+    - 被删块的 cache_control 顺延给其后第一个没有该标记的幸存块, 免得白白丢 prompt-cache 断点
+    """
+    import re as _re
+    sysv = body.get("system")
+    if sysv is None:
+        return body, 0
+
+    # 客户端直接发字符串形式
+    if isinstance(sysv, str):
+        ns = _re.sub(CC_ID_PAT, "", sysv)
+        if ns == sysv:
+            return body, 0
+        nb = dict(body)
+        if ns.strip():
+            nb["system"] = ns
+        else:
+            nb.pop("system", None)
+        return nb, 1
+
+    if not isinstance(sysv, list):
+        return body, 0
+
+    kept = []
+    carried = []   # (被删块本该落到的下标, cache_control)
+    removed = 0
+    for blk in sysv:
+        txt = blk.get("text") if isinstance(blk, dict) else None
+        if isinstance(txt, str):
+            t = txt.strip()
+            if t.startswith(CC_BILLING_PREFIX) or _re.fullmatch(CC_ID_PAT, t):
+                removed += 1
+                if blk.get("cache_control"):
+                    carried.append((len(kept), blk["cache_control"]))
+                continue
+            if _re.search(CC_ID_PAT, txt):
+                nb_blk = dict(blk)
+                nb_blk["text"] = _re.sub(CC_ID_PAT, "", txt)
+                removed += 1
+                kept.append(nb_blk)
+                continue
+        kept.append(blk)
+
+    if not removed:
+        return body, 0
+
+    # 缓存断点顺延: 从被删位置起的第一个没有 cache_control 的幸存块接手
+    for pos, cc in carried:
+        for i in range(pos, len(kept)):
+            blk = kept[i]
+            if isinstance(blk, dict) and not blk.get("cache_control"):
+                nb_blk = dict(blk)
+                nb_blk["cache_control"] = cc
+                kept[i] = nb_blk
+                break
+
+    nb = dict(body)
+    if kept:
+        nb["system"] = kept
+    else:
+        nb.pop("system", None)   # 别发 "system": []
+    return nb, removed
+
+
 def pick_route(conf, method, path, headers, body_json, body_raw):
     """统一路由: 返回 (upstream_name, map_model|None, reason)
     router.route = "hybrid" | "codex" | "deepseek"
@@ -388,6 +459,8 @@ def stats_snapshot():
             # 推理强度(预留字段, UI 可展示/回传); 每档可独立配置 tier_efforts
             'efforts': list(EFFORT_VALUES),
             'effort': (rt.get('effort') or 'medium'),
+            # 主模型档指纹清理开关(主模型卡右上角)
+            'strip_cc_banner': bool(rt.get('strip_cc_banner')),
             'tier_efforts': {
                 'main':   ((rt.get('tier_efforts') or {}).get('main')   or rt.get('effort') or 'medium'),
                 'opus':   ((rt.get('tier_efforts') or {}).get('opus')   or rt.get('effort') or 'medium'),
@@ -477,6 +550,14 @@ class Relay(BaseHTTPRequestHandler):
             body_json["thinking"] = REASONING_MAP[effort]
             raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
+        # CC 指纹清理(主模型卡右上角开关): 删 system 里的身份句 + billing 头
+        stripped_n = 0
+        if (router_cfg.get("strip_cc_banner") and "hybrid:main" in (reason or "")
+                and isinstance(body_json, dict)):
+            body_json, stripped_n = _strip_cc_fingerprint(body_json)
+            if stripped_n:
+                raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
         # headers
         fwd = {}
         for k, v in self.headers.items():
@@ -526,6 +607,7 @@ class Relay(BaseHTTPRequestHandler):
                 "body": body_json, "body_raw": raw.decode("utf-8", "replace")[:conf.get("max_body_capture", 2000000)],
                 "route": up_name, "route_reason": reason,
                 "orig_model": orig_model, "sent_model": sent_model,
+                "stripped_banner": stripped_n,
                 "upstream": upstream, "resp_status": status,
                 "resp_body": rbody.decode("utf-8", "replace")[:conf.get("max_body_capture", 2000000)],
                 "resp_error": err,
@@ -641,6 +723,9 @@ class UIHandler(BaseHTTPRequestHandler):
             conf = load_conf()
             rt = conf.setdefault("router", {})
             rt["route"] = route
+            # 主模型档指纹清理开关 (与路由档位无关, 任何模式下都可改)
+            if data.get("strip_cc_banner") is not None:
+                rt["strip_cc_banner"] = bool(data.get("strip_cc_banner"))
             # 推理强度 effort 为全局设置, 任何路由下都可修改 (档位见 EFFORT_VALUES)
             if data.get("effort") is not None:
                 v = str(data.get("effort") or "").strip()

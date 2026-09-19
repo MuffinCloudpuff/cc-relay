@@ -223,9 +223,12 @@ setx ANTHROPIC_SMALL_FAST_MODEL "FAST_MODEL[1m]"
     "main": "medium", "opus": "medium",
     "sonnet": "instant", "fast": "instant", "agent": "medium"
   },
-  "effort": "medium"              // 全局兜底强度（档位没配时用这个）
+  "effort": "medium",             // 全局兜底强度（档位没配时用这个）
+  "strip_cc_banner": false        // 主模型档指纹清理（见下），与路由档位无关
 }
 ```
+
+**指纹清理（`strip_cc_banner`）**：开启后，只对命中 `hybrid:main` 的请求做一次 body 改写——删掉 system 里整块的 CC 身份句（`You are Claude Code, Anthropic's official CLI for Claude.`）和 `x-anthropic-billing-header:` 开头的 billing 指纹块，身份句混在别的文本里则只摘句子；被删块的 `cache_control` 会顺延给后面第一个没有该标记的幸存块，不会白白丢 prompt-cache 断点。UI 上就是主模型卡右上角那个小开关，也可以 `curl -d '{"strip_cc_banner":true}'` 改。抓包列表里该请求会显示删了几块。
 
 **档位怎么落到 CC 上**：
 

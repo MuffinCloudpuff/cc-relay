@@ -24,12 +24,21 @@
   "router": {
     "route": "hybrid",
     "tiers": {
-      "main": "deepseek-v4-flash",
-      "opus": "gpt-5.6-sol",
-      "sonnet": "deepseek-v4-flash",
-      "fast": "deepseek-v4-flash"
+      "main": "deepseek-flash",
+      "opus": "deepseek-flash",
+      "sonnet": "gpt-5.6-luna",
+      "fast": "gpt-5.6-luna",
+      "agent": "gpt-5.6-sol"
     },
-    "effort": "medium"
+    "effort": "medium",
+    "tier_efforts": {
+      "main": "medium",
+      "opus": "medium",
+      "sonnet": "instant",
+      "fast": "instant",
+      "agent": "medium"
+    },
+    "strip_cc_banner": false
   },
   "ui_port": 8610
 }

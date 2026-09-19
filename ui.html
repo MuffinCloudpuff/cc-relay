@@ -136,6 +136,17 @@
   .tier .hint{display:block;font-size:10px;color:var(--faint);margin-top:2px;line-height:1.4}
   .tier .sel{margin-top:10px}
   .tier .sel-model,.tier .ve-model{font-size:11.5px}
+  /* 主模型卡右上角: 指纹清理开关 */
+  .tier-top{display:flex;align-items:flex-start;gap:8px}
+  .tier-top .tt-l{flex:1;min-width:0}
+  .sw{flex:none;width:30px;height:17px;border-radius:99px;border:1px solid var(--line2);
+      background:#0b0f17;cursor:pointer;padding:0;position:relative;transition:.15s;margin-top:1px}
+  .sw::after{content:'';position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;
+             background:var(--faint);transition:.15s}
+  .sw:hover{border-color:#3d4a5f}
+  .sw.on{border-color:var(--hb);background:var(--hb-soft)}
+  .sw.on::after{left:15px;background:var(--hb);box-shadow:0 0 6px rgba(63,185,80,.7)}
+  .sw:disabled{opacity:.4;cursor:not-allowed}
 
   /* ── 代理条 ── */
   .proxybar{display:flex;align-items:center;gap:12px;margin-top:16px;background:var(--card);
@@ -287,8 +298,13 @@
     </div>
     <div class="hb-grid">
       <div class="tier">
-        <span class="tier-label">主模型 <em>ANTHROPIC_MODEL</em></span>
-        <span class="hint">日常主力, 便宜快</span>
+        <div class="tier-top">
+          <div class="tt-l">
+            <span class="tier-label">主模型 <em>ANTHROPIC_MODEL</em></span>
+            <span class="hint">日常主力, 便宜快</span>
+          </div>
+          <button class="sw" id="sw-strip" title="转发到主模型档前, 删除 system 里的 CC 身份句 + billing 指纹块 (规避上游风控)"></button>
+        </div>
         <div class="sel" data-kind="hb" data-tier="main">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
           <div class="sel-panel">
@@ -556,6 +572,18 @@ $$('.sel').forEach(sel=>{
   });
 });
 
+// 主模型卡右上角开关: 转发到主模型档前删除 CC 身份句 + billing 指纹块
+$('#sw-strip').addEventListener('click',async e=>{
+  e.stopPropagation();
+  const sw=e.currentTarget,on=!sw.classList.contains('on');
+  sw.classList.toggle('on',on);                 // 本地即时反馈, 失败由 refresh() 回滚
+  try{
+    const r=await api('/api/route',{route:(st&&st.route)||'hybrid',strip_cc_banner:on});
+    if(r.error){toast('失败: '+r.error,true);await refresh();return}
+    toast(on?'已开启: 主模型档转发前删除 CC 身份句 + billing 指纹':'已关闭指纹清理');
+  }catch(err){toast('请求失败: '+err,true);await refresh()}
+});
+
 // ── 状态刷新 ──
 async function refresh(){
   st=await api('/api/status');
@@ -574,6 +602,9 @@ async function refresh(){
     const sel=$('.sel[data-tier="'+t+'"]');
     buildSel(sel,models,tiers[t]||def[t],te[t]||st.effort||'medium');
   });
+  // 指纹清理开关状态一律以服务端为准 (DOM 每轮重建)
+  const sw=$('#sw-strip');
+  if(sw){sw.classList.toggle('on',!!st.strip_cc_banner);sw.disabled=!hb}
   const run=!!st.proxy_running;
   $('#pdot').className='dot'+(run?' on':'');$('#pdot2').className='dot'+(run?' on':'');
   $('#ptxt2').textContent=run?'运行中':'未运行';
@@ -691,6 +722,7 @@ async function toggleDetail(idx){
       'CC 发出模型  : '+r.orig_model+'\n'+
       '选中转发模型 : '+r.sent_model+'\n'+
       '上游 / 规则  : '+r.route+'  /  '+r.route_reason+'\n'+
+      '指纹清理     : '+(r.stripped_banner?('已删除 '+r.stripped_banner+' 块'):'未启用')+'\n'+
       '状态码       : '+r.resp_status+'\n'+
       '子代理 ID    : '+agentId+'\n'+
       '会话 ID      : '+((r.headers&&r.headers['X-Claude-Code-Session-Id'])||'-')+'\n'+
