@@ -128,7 +128,7 @@
   .hb-head .cicon{margin-bottom:0}
   .hb-head .hb-title{flex:1;padding-top:3px}
   .hb-head .footbtn{width:auto;margin-top:0;padding:9px 26px;flex:none}
-  .hb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:6px}
+  .hb-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:6px}
   .tier{background:#0e1420;border:1px solid var(--line);border-radius:13px;padding:13px 12px 12px;display:flex;flex-direction:column}
   .tier .tier-label{font-size:11.5px;font-weight:600;color:var(--dim)}
   .tier em{display:block;font-style:normal;font-size:9.5px;color:var(--faint);font-family:var(--mono);
@@ -220,8 +220,9 @@
   .toast.err{background:#b62324}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
-  @media(max-width:980px){ .hb-grid{grid-template-columns:1fr 1fr} }
+  @media(max-width:1050px){ .hb-grid{grid-template-columns:repeat(3,minmax(0,1fr))} }
   @media(max-width:880px){ .row2{grid-template-columns:1fr} }
+  @media(max-width:760px){ .hb-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
   @media(max-width:520px){ .hb-grid{grid-template-columns:1fr} }
 </style>
 </head>
@@ -303,7 +304,9 @@
             <span class="tier-label">主模型 <em>ANTHROPIC_MODEL</em></span>
             <span class="hint">日常主力, 便宜快</span>
           </div>
-          <button class="sw" id="sw-strip" title="转发到主模型档前, 删除 system 里的 CC 身份句 + billing 指纹块 (规避上游风控)"></button>
+          <button type="button" class="sw strip-sw" data-tier="main" role="switch" aria-checked="false"
+                  aria-label="主模型档指纹清理"
+                  title="转发到主模型档前, 删除已识别的 CC / Agent SDK 身份句 + billing 指纹块 (规避上游风控)"></button>
         </div>
         <div class="sel" data-kind="hb" data-tier="main">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
@@ -321,8 +324,15 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">explore代理 <em>ANTHROPIC_DEFAULT_OPUS_MODEL</em></span>
-        <span class="hint">高价值, 值得</span>
+        <div class="tier-top">
+          <div class="tt-l">
+            <span class="tier-label">explore代理 <em>ANTHROPIC_DEFAULT_OPUS_MODEL</em></span>
+            <span class="hint">高价值, 值得</span>
+          </div>
+          <button type="button" class="sw strip-sw" data-tier="opus" role="switch" aria-checked="false"
+                  aria-label="explore代理档指纹清理"
+                  title="转发到 explore代理档前, 删除已识别的 CC / Agent SDK 身份句 + billing 指纹块 (规避上游风控)"></button>
+        </div>
         <div class="sel" data-kind="hb" data-tier="opus">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
           <div class="sel-panel">
@@ -339,8 +349,15 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">审查代理 <em>ANTHROPIC_DEFAULT_SONNET_MODEL</em></span>
-        <span class="hint">子代理省钱</span>
+        <div class="tier-top">
+          <div class="tt-l">
+            <span class="tier-label">审查代理 <em>ANTHROPIC_DEFAULT_SONNET_MODEL</em></span>
+            <span class="hint">子代理省钱</span>
+          </div>
+          <button type="button" class="sw strip-sw" data-tier="sonnet" role="switch" aria-checked="false"
+                  aria-label="审查代理档指纹清理"
+                  title="转发到审查代理档前, 删除已识别的 CC / Agent SDK 身份句 + billing 指纹块 (规避上游风控)"></button>
+        </div>
         <div class="sel" data-kind="hb" data-tier="sonnet">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
           <div class="sel-panel">
@@ -357,8 +374,15 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">任务名称代理 <em>ANTHROPIC_SMALL_FAST_MODEL</em></span>
-        <span class="hint">后台最便宜</span>
+        <div class="tier-top">
+          <div class="tt-l">
+            <span class="tier-label">任务名称代理 <em>ANTHROPIC_SMALL_FAST_MODEL</em></span>
+            <span class="hint">后台最便宜</span>
+          </div>
+          <button type="button" class="sw strip-sw" data-tier="fast" role="switch" aria-checked="false"
+                  aria-label="任务名称代理档指纹清理"
+                  title="转发到任务名称代理档前, 删除已识别的 CC / Agent SDK 身份句 + billing 指纹块 (规避上游风控)"></button>
+        </div>
         <div class="sel" data-kind="hb" data-tier="fast">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
           <div class="sel-panel">
@@ -375,8 +399,15 @@
         </div>
       </div>
       <div class="tier">
-        <span class="tier-label">plan代理 <em>ANTHROPIC_MODEL·子代理</em></span>
-        <span class="hint">Claude Agent SDK · model=本地中转 单独分流</span>
+        <div class="tier-top">
+          <div class="tt-l">
+            <span class="tier-label">plan代理 <em>ANTHROPIC_MODEL·子代理</em></span>
+            <span class="hint">Claude Agent SDK · model=本地中转 单独分流</span>
+          </div>
+          <button type="button" class="sw strip-sw" data-tier="agent" role="switch" aria-checked="false"
+                  aria-label="plan代理档指纹清理"
+                  title="转发到 plan代理档前, 删除已识别的 CC / Agent SDK 身份句 + billing 指纹块 (规避上游风控)"></button>
+        </div>
         <div class="sel" data-kind="hb" data-tier="agent">
           <div class="sel-btn"><span class="sel-model">—</span><span class="sel-eff">中</span><span class="sel-select">选择强度</span><span class="chev">▾</span></div>
           <div class="sel-panel">
@@ -572,17 +603,20 @@ $$('.sel').forEach(sel=>{
   });
 });
 
-// 主模型卡右上角开关: 转发到主模型档前删除 CC 身份句 + billing 指纹块
-$('#sw-strip').addEventListener('click',async e=>{
+// 各档卡右上角开关: 转发到该档前删除已识别的 CC / Agent SDK 身份句 + billing 指纹块
+document.querySelectorAll('.strip-sw').forEach(sw=>sw.addEventListener('click',async e=>{
   e.stopPropagation();
-  const sw=e.currentTarget,on=!sw.classList.contains('on');
-  sw.classList.toggle('on',on);                 // 本地即时反馈, 失败由 refresh() 回滚
+  if(sw.disabled||sw.dataset.pending==='1')return;   // 防连点乱序
+  const tier=sw.dataset.tier,on=!sw.classList.contains('on');
+  sw.dataset.pending='1';sw.disabled=true;
+  sw.classList.toggle('on',on);                 // 本地即时反馈, 最终以服务端为准
   try{
-    const r=await api('/api/route',{route:(st&&st.route)||'hybrid',strip_cc_banner:on});
-    if(r.error){toast('失败: '+r.error,true);await refresh();return}
-    toast(on?'已开启: 主模型档转发前删除 CC 身份句 + billing 指纹':'已关闭指纹清理');
-  }catch(err){toast('请求失败: '+err,true);await refresh()}
-});
+    const r=await api('/api/route',{route:(st&&st.route)||'hybrid',strip_cc_banner:{[tier]:on}});
+    if(r.error)throw new Error(r.error);
+    toast((TIER_NAME[tier]||tier)+'档指纹清理已'+(on?'开启':'关闭'));
+  }catch(err){toast('请求失败: '+err,true)}
+  finally{delete sw.dataset.pending;await refresh()}
+}));
 
 // ── 状态刷新 ──
 async function refresh(){
@@ -602,9 +636,13 @@ async function refresh(){
     const sel=$('.sel[data-tier="'+t+'"]');
     buildSel(sel,models,tiers[t]||def[t],te[t]||st.effort||'medium');
   });
-  // 指纹清理开关状态一律以服务端为准 (DOM 每轮重建)
-  const sw=$('#sw-strip');
-  if(sw){sw.classList.toggle('on',!!st.strip_cc_banner);sw.disabled=!hb}
+  // 指纹清理开关状态一律以服务端为准 (DOM 每轮重建); 提交中的开关跳过, 免轮询覆盖乐观状态
+  const sf=st.strip_cc_banner||{};
+  document.querySelectorAll('.strip-sw').forEach(sw=>{
+    const on=!!sf[sw.dataset.tier],pending=sw.dataset.pending==='1';
+    if(!pending){sw.classList.toggle('on',on);sw.setAttribute('aria-checked',String(on))}
+    sw.disabled=!hb||pending;
+  });
   const run=!!st.proxy_running;
   $('#pdot').className='dot'+(run?' on':'');$('#pdot2').className='dot'+(run?' on':'');
   $('#ptxt2').textContent=run?'运行中':'未运行';

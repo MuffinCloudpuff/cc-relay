@@ -38,7 +38,13 @@
       "fast": "instant",
       "agent": "medium"
     },
-    "strip_cc_banner": false
+    "strip_cc_banner": {
+      "main": true,
+      "opus": false,
+      "sonnet": false,
+      "fast": true,
+      "agent": false
+    }
   },
   "ui_port": 8610
 }

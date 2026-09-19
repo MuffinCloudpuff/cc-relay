@@ -15,7 +15,7 @@ Claude Code ──(假 sk)──▶ cc-relay :8400 ──┬──▶ DeepSeek A
 - **五档位路由**：按 CC 的身份档位（主模型 / OPUS / SONNET / FAST / 子代理）分别路由到不同模型
 - **运行时热切换**：UI 上改路由，**运行中的 CC 下一个请求即生效**，无需重启
 - **档位级推理强度**：全局或每档单独设 effort，注入到请求体的 `thinking` 参数
-- **CC 指纹清理**（可选，主模型卡右上角开关）：转发前删掉 system 里的 CC 身份句与 `x-anthropic-billing-header` 指纹块，规避上游风控
+- **CC 指纹清理**（可选，五张档位卡各自一个右上角开关）：转发前删掉 system 里的 CC / Agent SDK 身份句与 `x-anthropic-billing-header` 指纹块，规避上游风控
 - **实时流量统计**：按「上游 + 实际模型」聚合请求数 / 成功 / 失败
 - **抓包查看器**：逐条查看「CC 发了什么 → 我们选了谁转发 → 走了哪个上游 → 命中什么规则」
 - **生命周期托管**：敲 `claude` 自动拉起中转，最后一个 CC 退出后自动关闭
@@ -194,7 +194,7 @@ python lifecycle.py stopall     # 全部停止
 
 - **路由卡片**：DeepSeek 直连 / Codex 全量 / 混合（含 5 档下拉）
 - **模型推理强度**：全局 + 档位级 effort 选择
-- **指纹清理开关**：主模型卡右上角小开关，仅对命中 `hybrid:main` 的请求生效，切换后下一个请求即生效
+- **指纹清理开关**：五张档位卡右上角各一个小开关，各自独立，只对命中该档（`hybrid:main` / `opus` / `sonnet` / `fast` / `agent`）的请求生效，切换后下一个请求即生效
 - **代理状态条**：Codex 上游运行状态与启停
 - **📊 实时模型流量**：按上游 + 实际模型聚合
 - **🔍 抓包查看器**：逐条查看 CC 请求与路由决策，点行展开完整 headers/body/响应
@@ -226,7 +226,7 @@ python lifecycle.py stopall     # 全部停止
   "efforts": ["off","on","instant","low","medium","high","xhigh","max"],
   "effort": "medium",
   "tier_efforts": { "main": "...", "opus": "...", "sonnet": "...", "fast": "...", "agent": "..." },
-  "strip_cc_banner": false,        // 主模型档指纹清理开关（与路由档位无关）
+  "strip_cc_banner": { "main": true, "opus": false, "sonnet": false, "fast": true, "agent": false },
   "proxy_running": true, "codex_up": true,
   "rows": [{ "route": "deepseek", "model": "deepseek-flash", "sent": "...", "req": 5, "ok": 5, "err": 0, "last": 12 }],
   "total": 8
@@ -244,25 +244,27 @@ curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json"
   "tier_efforts": {"main":"medium","opus":"medium","sonnet":"instant","fast":"instant","agent":"medium"}
 }'
 
-# 只开指纹清理（路由/档位不变）
+# 只开某档的指纹清理（路由/档位不变，按档合并）
 curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json" \
-  -d '{"strip_cc_banner":true}'
+  -d '{"strip_cc_banner":{"main":true,"fast":true}}'   # 传 bool 等价于只改 main
 
 # 全部走 DeepSeek
 curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json" \
   -d '{"route":"deepseek","model":"deepseek-flash"}'
 ```
 
-`tiers` / `tier_efforts` 只需传想改的档位，未传的保持不变（合并更新）。
+`tiers` / `tier_efforts` / `strip_cc_banner` 只需传想改的档位，未传的保持不变（合并更新）。
 
 ### 指纹清理（`strip_cc_banner`）
 
-开启后，**只对命中 `hybrid:main` 的请求**做一次 body 改写：
+每档一个开关，`router.strip_cc_banner` 是五键对象（`main` / `opus` / `sonnet` / `fast` / `agent`）。某档开启后，只对命中该档的请求做一次 body 改写：
 
-- 丢弃 system 里以 `x-anthropic-billing-header:` 开头的整块，以及整块等于 CC 身份句（`You are Claude Code, Anthropic's official CLI for Claude.`）的块
+- 丢弃 system 里以 `x-anthropic-billing-header:` 开头的整块，以及整块等于已识别身份句的块（`You are Claude Code, Anthropic's official CLI for Claude.` / `You are a Claude agent, built on Anthropic's Claude Agent SDK.`）
 - 身份句混在别的文本里时只摘句子，块本身保留
-- 被删块的 `cache_control` 会顺延给后面第一个没有该标记的幸存块，避免白白丢 prompt-cache 断点
+- 被删块的 `cache_control` 顺延给其后最近的幸存块；该处已有断点就不动；被删的是尾块时向前落到最近的幸存块——不白丢 prompt-cache 断点
 - system 被删空时整个字段不发送（不发 `"system": []`）
+
+兼容旧配置：`strip_cc_banner` 写成单个 `true` 时展开为主档 + fast 档开启；写成 `false` / 缺失则全关。`POST /api/route` 传单个 bool 等价于只改 `main`。
 
 抓包查看器里该请求会多一行 `指纹清理: 已删除 N 块 / 未启用`。
 
@@ -304,7 +306,8 @@ python cc_relay.py proxycheck   # 查询 Codex 上游存活
 - **2026-09-10** 五档位（新增子代理 `agent` 档）+ 档位级 `tier_efforts` 推理强度 + `instant/xhigh/max` 档
 - 运行时模型列表实拉（`/v1/models`，120s 缓存），取代手写模型表
 - **2026-09-19** 抓包查看器重绘优化：数据未变不碰 DOM，重绘后按「当前可见行」还原视口、恢复展开项及其内部滚动位置
-- **2026-09-19** 主模型档指纹清理开关（`router.strip_cc_banner`）：删 system 中的 CC 身份句 + billing 头块，`cache_control` 顺延，抓包显示删除块数
+- **2026-09-19** 指纹清理开关（`router.strip_cc_banner`）：删 system 中的 CC / Agent SDK 身份句 + billing 头块，`cache_control` 顺延，抓包显示删除块数；**五档各自独立开关**（旧布尔配置自动迁移为主档 + fast 档）
+- **2026-09-19** `POST /api/route` 读-改-写全程串行 + 配置原子写回（`.tmp` → `replace`），修五档连点丢更新；`tier_efforts` 改仅接受合法强度值
 
 ---
 

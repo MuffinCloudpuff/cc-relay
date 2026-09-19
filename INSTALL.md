@@ -224,11 +224,13 @@ setx ANTHROPIC_SMALL_FAST_MODEL "FAST_MODEL[1m]"
     "sonnet": "instant", "fast": "instant", "agent": "medium"
   },
   "effort": "medium",             // 全局兜底强度（档位没配时用这个）
-  "strip_cc_banner": false        // 主模型档指纹清理（见下），与路由档位无关
+  "strip_cc_banner": {            // 各档指纹清理（见下），与路由档位无关
+    "main": true, "opus": false, "sonnet": false, "fast": true, "agent": false
+  }
 }
 ```
 
-**指纹清理（`strip_cc_banner`）**：开启后，只对命中 `hybrid:main` 的请求做一次 body 改写——删掉 system 里整块的 CC 身份句（`You are Claude Code, Anthropic's official CLI for Claude.`）和 `x-anthropic-billing-header:` 开头的 billing 指纹块，身份句混在别的文本里则只摘句子；被删块的 `cache_control` 会顺延给后面第一个没有该标记的幸存块，不会白白丢 prompt-cache 断点。UI 上就是主模型卡右上角那个小开关，也可以 `curl -d '{"strip_cc_banner":true}'` 改。抓包列表里该请求会显示删了几块。
+**指纹清理（`strip_cc_banner`）**：五档各自一个开关，某档开启后只对命中该档的请求做一次 body 改写——删掉 system 里整块的 CC / Agent SDK 身份句（`You are Claude Code, Anthropic's official CLI for Claude.` 或 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`）和 `x-anthropic-billing-header:` 开头的 billing 指纹块，身份句混在别的文本里则只摘句子；被删块的 `cache_control` 会顺延给其后最近的幸存块（该处已有断点就不动，被删的是尾块则向前落），不会白白丢 prompt-cache 断点。UI 上就是每张档位卡右上角那个小开关，也可以 `curl -d '{"strip_cc_banner":{"main":true}}'` 按档改；传单个 `true`/`false` 等价于只改 `main`（旧的单值配置也会自动迁移为主档 + fast 档）。抓包列表里该请求会显示删了几块。
 
 **档位怎么落到 CC 上**：
 

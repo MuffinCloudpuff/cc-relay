@@ -30,6 +30,17 @@ def load_conf():
         return json.load(f)
 
 
+CONF_LOCK = threading.Lock()
+
+
+def _save_conf(conf):
+    """原子写回配置: 先写 .tmp 再 replace, 免并发丢更新 / 读到半份 JSON"""
+    tmp = CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(conf, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONF)
+
+
 MAX_RECORD_BYTES = 1024 * 1024 * 1024   # 1 GB 上限
 KEEP_RATIO = 0.5                        # 超限时保留最近一半
 _last_check = [0.0]
@@ -225,9 +236,32 @@ def _is_subagent(headers, body_json):
         return False
 
 
-# ---------- CC 指纹清理 (主模型档开关) ----------
-CC_ID_PAT = r"You are Claude Code,?\s*Anthropic's official CLI for Claude\.?"
+# ---------- CC 指纹清理 (每档独立开关) ----------
+CC_ID_PAT = (r"(?:You are Claude Code,?\s*Anthropic's official CLI for Claude\.?"
+             r"|You are a Claude agent,\s*built on Anthropic's Claude Agent SDK\.?)")
 CC_BILLING_PREFIX = "x-anthropic-billing-header:"
+
+TIER_KEYS = ("main", "opus", "sonnet", "fast", "agent")
+# 旧配置 strip_cc_banner=true 的迁移去向(主档 + fast 档)
+LEGACY_STRIP_DEFAULTS = {"main": True, "opus": False, "sonnet": False, "fast": True, "agent": False}
+
+
+def _strip_flags(router):
+    """开关归一化 -> 五键布尔对象 (读接口 / 生效判断 / 写入合并的唯一入口)"""
+    v = router.get("strip_cc_banner")
+    if isinstance(v, dict):
+        return {k: v.get(k) is True for k in TIER_KEYS}   # 严格布尔, 防 "false" 被当成真
+    if v is True:
+        return dict(LEGACY_STRIP_DEFAULTS)
+    return {k: False for k in TIER_KEYS}
+
+
+def _tier_from_reason(reason):
+    """reason -> 档位名; 非档位(hybrid:gpt-direct / route:*)返回 None"""
+    if not isinstance(reason, str) or not reason.startswith("hybrid:"):
+        return None
+    t = reason[len("hybrid:"):]
+    return t if t in TIER_KEYS else None
 
 
 def _strip_cc_fingerprint(body):
@@ -278,15 +312,34 @@ def _strip_cc_fingerprint(body):
     if not removed:
         return body, 0
 
-    # 缓存断点顺延: 从被删位置起的第一个没有 cache_control 的幸存块接手
+    # 缓存断点顺延: 优先落给其后最近的幸存块; 该处已有断点则不动;
+    # 被删的是尾块时向前落到最近的幸存块
     for pos, cc in carried:
+        placed = False
         for i in range(pos, len(kept)):
             blk = kept[i]
-            if isinstance(blk, dict) and not blk.get("cache_control"):
-                nb_blk = dict(blk)
-                nb_blk["cache_control"] = cc
-                kept[i] = nb_blk
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("cache_control"):
+                placed = True          # 已有断点覆盖该位置, 不必再往后推
                 break
+            nb_blk = dict(blk)
+            nb_blk["cache_control"] = cc
+            kept[i] = nb_blk
+            placed = True
+            break
+        if placed:
+            continue
+        for i in range(min(pos, len(kept)) - 1, -1, -1):
+            blk = kept[i]
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("cache_control"):
+                break
+            nb_blk = dict(blk)
+            nb_blk["cache_control"] = cc
+            kept[i] = nb_blk
+            break
 
     nb = dict(body)
     if kept:
@@ -459,8 +512,8 @@ def stats_snapshot():
             # 推理强度(预留字段, UI 可展示/回传); 每档可独立配置 tier_efforts
             'efforts': list(EFFORT_VALUES),
             'effort': (rt.get('effort') or 'medium'),
-            # 主模型档指纹清理开关(主模型卡右上角)
-            'strip_cc_banner': bool(rt.get('strip_cc_banner')),
+            # 各档指纹清理开关(五张档位卡右上角)
+            'strip_cc_banner': _strip_flags(rt),
             'tier_efforts': {
                 'main':   ((rt.get('tier_efforts') or {}).get('main')   or rt.get('effort') or 'medium'),
                 'opus':   ((rt.get('tier_efforts') or {}).get('opus')   or rt.get('effort') or 'medium'),
@@ -539,20 +592,19 @@ class Relay(BaseHTTPRequestHandler):
 
         # 推理强度注入: effort(全局, 可按档位覆盖) -> body.thinking
         router_cfg = conf.get("router") or {}
+        tier_hit = _tier_from_reason(reason)   # 档位命中, 强度与去指纹共用
         effort = (router_cfg.get("effort") or "medium").strip()
         te = router_cfg.get("tier_efforts") or {}
-        for _k in ("main", "opus", "sonnet", "fast", "agent"):
-            if ("hybrid:" + _k) in (reason or ""):
-                effort = (te.get(_k) or effort)
-                break
+        if tier_hit:
+            effort = (te.get(tier_hit) or effort)
         if effort in REASONING_MAP and isinstance(body_json, dict):
             body_json = dict(body_json)
             body_json["thinking"] = REASONING_MAP[effort]
             raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
-        # CC 指纹清理(主模型卡右上角开关): 删 system 里的身份句 + billing 头
+        # CC 指纹清理(各档卡右上角开关): 删 system 里的身份句 + billing 头
         stripped_n = 0
-        if (router_cfg.get("strip_cc_banner") and "hybrid:main" in (reason or "")
+        if (tier_hit and _strip_flags(router_cfg)[tier_hit]
                 and isinstance(body_json, dict)):
             body_json, stripped_n = _strip_cc_fingerprint(body_json)
             if stripped_n:
@@ -720,63 +772,78 @@ class UIHandler(BaseHTTPRequestHandler):
             route = data.get("route")
             if route not in ("hybrid", "codex", "deepseek"):
                 self._json({"error": "bad route"}, 400); return
-            conf = load_conf()
-            rt = conf.setdefault("router", {})
-            rt["route"] = route
-            # 主模型档指纹清理开关 (与路由档位无关, 任何模式下都可改)
-            if data.get("strip_cc_banner") is not None:
-                rt["strip_cc_banner"] = bool(data.get("strip_cc_banner"))
-            # 推理强度 effort 为全局设置, 任何路由下都可修改 (档位见 EFFORT_VALUES)
-            if data.get("effort") is not None:
-                v = str(data.get("effort") or "").strip()
-                if v in EFFORT_VALUES:
-                    rt["effort"] = v
-                else:
-                    rt.pop("effort", None)
-            # 每档独立推理强度 tier_efforts (main/opus/sonnet/fast/agent), 合并更新
-            if data.get("tier_efforts") is not None:
-                t = data.get("tier_efforts") or {}
-                cur = dict(rt.get("tier_efforts") or {})
-                for k in ("main", "opus", "sonnet", "fast", "agent"):
-                    v = str((t or {}).get(k) or "").strip()
+            with CONF_LOCK:                      # 读-改-写整体串行, 免五档连点丢更新
+                conf = load_conf()
+                rt = conf.setdefault("router", {})
+                rt["route"] = route
+                # 各档指纹清理开关 (与路由档位无关, 任何模式下都可改; 按档合并更新)
+                if "strip_cc_banner" in data:
+                    cur = _strip_flags(rt)           # 先归一化, 兼容旧布尔配置
+                    payload = data["strip_cc_banner"]
+                    if isinstance(payload, bool):
+                        cur["main"] = payload        # 旧客户端: 旧按钮本来就只代表主档
+                    elif isinstance(payload, dict):
+                        for k in TIER_KEYS:
+                            if k not in payload:
+                                continue
+                            if not isinstance(payload[k], bool):
+                                self._json({"error": "strip_cc_banner.%s must be boolean" % k}, 400)
+                                return
+                            cur[k] = payload[k]
+                    else:
+                        self._json({"error": "strip_cc_banner must be boolean or object"}, 400)
+                        return
+                    rt["strip_cc_banner"] = cur
+                # 推理强度 effort 为全局设置, 任何路由下都可修改 (档位见 EFFORT_VALUES)
+                if data.get("effort") is not None:
+                    v = str(data.get("effort") or "").strip()
                     if v in EFFORT_VALUES:
-                        cur[k] = v
-                if cur:
-                    rt["tier_efforts"] = cur
-                else:
-                    rt.pop("tier_efforts", None)
-            if route == "hybrid":
-                # hybrid 五档: tiers.main/opus/sonnet/fast/agent (各自模型, 上游随模型名决定)
-                if data.get("tiers") is not None:
-                    t = data.get("tiers") or {}
-                    cur = dict(rt.get("tiers") or {})
+                        rt["effort"] = v
+                    else:
+                        rt.pop("effort", None)
+                # 每档独立推理强度 tier_efforts (main/opus/sonnet/fast/agent), 合并更新
+                if data.get("tier_efforts") is not None:
+                    t = data.get("tier_efforts") or {}
+                    cur = dict(rt.get("tier_efforts") or {})
                     for k in ("main", "opus", "sonnet", "fast", "agent"):
                         v = str((t or {}).get(k) or "").strip()
-                        if v:
+                        if v in EFFORT_VALUES:
                             cur[k] = v
                     if cur:
-                        rt["tiers"] = cur
+                        rt["tier_efforts"] = cur
                     else:
-                        rt.pop("tiers", None)
-                # 兼容旧字段
-                if data.get("codex_model") is not None:
-                    v = str(data.get("codex_model") or "").strip()
-                    if v: rt["hybrid_codex_model"] = v
-                    else: rt.pop("hybrid_codex_model", None)
-                if data.get("deepseek_model") is not None:
-                    v = str(data.get("deepseek_model") or "").strip()
-                    if v: rt["hybrid_deepseek_model"] = v
-                    else: rt.pop("hybrid_deepseek_model", None)
-                rt.pop("model", None)
-            else:
-                m = (data.get("model") or "").strip()
-                if not m:
+                        rt.pop("tier_efforts", None)
+                if route == "hybrid":
+                    # hybrid 五档: tiers.main/opus/sonnet/fast/agent (各自模型, 上游随模型名决定)
+                    if data.get("tiers") is not None:
+                        t = data.get("tiers") or {}
+                        cur = dict(rt.get("tiers") or {})
+                        for k in ("main", "opus", "sonnet", "fast", "agent"):
+                            v = str((t or {}).get(k) or "").strip()
+                            if v:
+                                cur[k] = v
+                        if cur:
+                            rt["tiers"] = cur
+                        else:
+                            rt.pop("tiers", None)
+                    # 兼容旧字段
+                    if data.get("codex_model") is not None:
+                        v = str(data.get("codex_model") or "").strip()
+                        if v: rt["hybrid_codex_model"] = v
+                        else: rt.pop("hybrid_codex_model", None)
+                    if data.get("deepseek_model") is not None:
+                        v = str(data.get("deepseek_model") or "").strip()
+                        if v: rt["hybrid_deepseek_model"] = v
+                        else: rt.pop("hybrid_deepseek_model", None)
                     rt.pop("model", None)
                 else:
-                    rt["model"] = m
-            with open(CONF, "w", encoding="utf-8") as f:
-                json.dump(conf, f, ensure_ascii=False, indent=2)
-            self._json({"ok": True, "route": route, "model": rt.get("model", "")})
+                    m = (data.get("model") or "").strip()
+                    if not m:
+                        rt.pop("model", None)
+                    else:
+                        rt["model"] = m
+                _save_conf(conf)
+                self._json({"ok": True, "route": route, "model": rt.get("model", "")})
         elif p == "/api/proxy":
             act = data.get("action")
             if act == "start": self._json({"result": codex_start(load_conf())})
