@@ -667,17 +667,29 @@ async function loadTraffic(){
     body.innerHTML=html;
   }catch(e){}
 }
-$('#b-treset').onclick=async()=>{await api('/api/reset',{});await loadTraffic();loadCalls()};
+$('#b-treset').onclick=async()=>{await api('/api/reset',{});await loadTraffic();loadCalls(true)};
 
 // ── 抓包查看器 (展开状态跨轮询保持) ──
 const _dc={};
-async function loadCalls(){
-  const open=[];
-  document.querySelectorAll('#cl-body .detail.show').forEach(el=>{const i=el.id.slice(3);if(i&&!open.includes(i))open.push(i)});
+let _clSig=null;
+async function loadCalls(force){
   try{
     const d=await api('/api/calls?n=500');
     const calls=(d.calls||[]).slice().reverse();
+    // 数据没变就完全不碰 DOM: 否则每 5s 重绘一次, 会把滚动位置/展开态/选中文字全冲掉
+    const sig=calls.length?calls.map(c=>[c.idx,c.ts,c.orig_model,c.sent_model,c.route,c.route_reason,c.status,c.agent_id?1:0].join('\u0001')).join('\u0002'):'';
+    if(!force&&sig===_clSig)return;
+    _clSig=sig;
     const body=$('#cl-body');
+    // 重绘前记住视口: 锚定当前可见的第一行(新记录插在最上面, 只记 scrollY 会被顶动)
+    let anchor=null;
+    for(const tr of document.querySelectorAll('#cl-body tr[data-idx]')){
+      const rc=tr.getBoundingClientRect();
+      if(rc.bottom>0){anchor={idx:tr.dataset.idx,top:rc.top};break}
+    }
+    const savedY=window.scrollY;
+    const dtops={};
+    document.querySelectorAll('#cl-body .detail.show').forEach(el=>{dtops[el.id]=el.scrollTop});
     if(!calls.length){body.innerHTML='<div class="none" style="color:var(--faint);padding:18px 0;text-align:center">暂无调用…</div>';return}
     let html='<table class="cl"><thead><tr><th>时间</th><th>CC 发出</th><th></th><th>选中转发</th><th>上游</th><th>规则</th><th>状态</th><th>来源</th></tr></thead><tbody>';
     for(const c of calls){
@@ -696,20 +708,26 @@ async function loadCalls(){
     html+='</tbody></table>';
     body.innerHTML=html;
     body.querySelectorAll('tr[data-idx]').forEach(tr=>tr.onclick=()=>toggleDetail(tr.dataset.idx));
-    open.forEach(i=>{
-      const el=$('#dt-'+i);if(!el)return;
-      const c=_dc[i];
-      if(c&&c.html){el.innerHTML=c.html;el.classList.add('show')}
-      else{el.textContent='加载中…';el.classList.add('show');toggleDetail(i)}
+    // 恢复展开项及其内部滚动位置(走 fetchDetail, 不经 toggleDetail, 免得反被折叠)
+    Object.keys(dtops).forEach(id=>{
+      const el=$('#'+id);if(!el)return;
+      const keep=dtops[id];
+      el.classList.add('show');
+      const c=_dc[id.slice(3)];
+      if(c&&c.html){el.innerHTML=c.html;el.scrollTop=keep}
+      else{el.textContent='加载中…';el.scrollTop=keep;fetchDetail(id.slice(3)).then(()=>{el.scrollTop=keep})}
     });
+    // 还原视口: 让原来那行仍停在原来的屏幕位置
+    if(anchor){
+      const tr=document.querySelector('#cl-body tr[data-idx="'+anchor.idx+'"]');
+      if(tr){const dy=tr.getBoundingClientRect().top-anchor.top;if(dy)window.scrollBy(0,dy)}
+      else window.scrollTo(0,savedY);
+    }
   }catch(e){}
 }
-async function toggleDetail(idx){
-  const el=$('#dt-'+idx);if(!el)return;
-  if(el.classList.contains('show')){el.classList.remove('show');return}
-  const cached=_dc[idx];
-  if(cached&&cached.html){el.innerHTML=cached.html;el.classList.add('show');return}
-  el.textContent='加载中…';el.classList.add('show');
+// 抓取并渲染某条详情(只渲染, 不切换展开状态) —— 展开态的恢复必须走这里
+async function fetchDetail(idx){
+  const el=$('#dt-'+idx);
   try{
     const r=await api('/api/call?idx='+idx);
     const b=r.body||{};
@@ -730,11 +748,19 @@ async function toggleDetail(idx){
       '\n--- system (前600) ---\n'+sys+'\n'+
       '\n--- messages ('+(b.messages||[]).length+') ---\n'+msgs+'\n'+
       '\n--- 响应 (前800) ---\n'+String(r.resp_body||'').slice(0,800);
-    el.textContent=text;
     _dc[idx]={html:text};
-  }catch(e){el.textContent='加载失败: '+e}
+    if(el)el.textContent=text;
+  }catch(e){if(el)el.textContent='加载失败: '+e}
 }
-$('#b-crefresh').onclick=loadCalls;
+async function toggleDetail(idx){
+  const el=$('#dt-'+idx);if(!el)return;
+  if(el.classList.contains('show')){el.classList.remove('show');return}
+  const cached=_dc[idx];
+  if(cached&&cached.html){el.innerHTML=cached.html;el.classList.add('show');return}
+  el.textContent='加载中…';el.classList.add('show');
+  await fetchDetail(idx);
+}
+$('#b-crefresh').onclick=()=>loadCalls(true);
 
 refresh();setInterval(refresh,4000);loadTraffic();setInterval(loadTraffic,3000);loadCalls();setInterval(loadCalls,5000);
 </script>

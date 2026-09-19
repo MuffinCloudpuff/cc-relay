@@ -303,6 +303,7 @@ python cc_relay.py proxycheck   # 查询 Codex 上游存活
 - **2026-09-10** 初版：双上游中转 + 三种路由 + 生命周期托管 + 流量统计 + 抓包查看器
 - **2026-09-10** 五档位（新增子代理 `agent` 档）+ 档位级 `tier_efforts` 推理强度 + `instant/xhigh/max` 档
 - 运行时模型列表实拉（`/v1/models`，120s 缓存），取代手写模型表
+- **2026-09-19** 抓包查看器重绘优化：数据未变不碰 DOM，重绘后按「当前可见行」还原视口、恢复展开项及其内部滚动位置
 - **2026-09-19** 主模型档指纹清理开关（`router.strip_cc_banner`）：删 system 中的 CC 身份句 + billing 头块，`cache_control` 顺延，抓包显示删除块数
 
 ---
