@@ -236,6 +236,7 @@ python lifecycle.py stopall     # 全部停止
 | POST | `/api/config` | 更新所有已配置上游的 URL/key；中转入口配置不在页面中修改 |
 | POST | `/api/route` | 切换路由 / 档位模型 / 推理强度 / 指纹清理开关 |
 | POST | `/api/proxy` | 启动 / 停止 Codex 上游 |
+| POST | `/api/upstream` | 按名字启动上游：`{"name":"codex","action":"start"｜"stop"}`、`{"name":"gemini","action":"start"}`（Gemini 只支持 `start`，响应额外附带 `probe` 只读探测结果） |
 | POST | `/api/reset` | 流量清零 |
 | GET | `/api/calls?n=60` | 抓包摘要列表 |
 | GET | `/api/call?idx=N` | 单条调用完整内容 |
@@ -315,6 +316,22 @@ curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json"
 
 抓包查看器里该请求会多一行 `指纹清理: 已删除 N 块 / 未启用`。
 
+### 请求改写模式（`modifier_mode` / `tier_modifier`）
+
+每档一个三态选择，决定转发前怎么处理 system：
+
+| 取值 | 行为 |
+|---|---|
+| `original` | **原版纯透传**：不动 body、不改请求头、不做指纹过滤 |
+| `builtin` | **内置清理**：删掉 CC / Agent SDK 身份句与 `x-anthropic-billing-header` 块 |
+| `custom` | **自定义**：用 UI「提示词」页面给该档配置的 system 替换（保留 prompt-cache 断点） |
+
+- `router.tier_modifier` 是五键对象（`main` / `opus` / `sonnet` / `fast` / `agent`）；命中档位时以它为准，**该档没显式配置 = 原版透传**（不会掉进全局 `custom`）
+- 只有没命中档位的请求才回退到全局 `router.modifier_mode`（默认 `custom`；此模式下会热重载执行 `custom_modifier.py` 的 `modify_body` / `modify_headers`）
+- 全部走 Gemini 上游（非 hybrid）时由 `router.gemini_modifier` 单独控制，默认 `builtin`
+- `strip_cc_banner` 依然有效：`builtin` 模式必定执行内置清理；`custom` 模式下若自定义修改器缺失或抛错，按该档 `strip_cc_banner` 开关回退到内置清理
+- 改法：UI 上每张档位卡右上角的三选框，或 `curl -d '{"tier_modifier":{"opus":"builtin"}}'`（只改传进来的档位）
+
 ---
 
 ## 命令行工具
@@ -355,6 +372,10 @@ python cc_relay.py proxycheck   # 查询 Codex 上游存活
 - **2026-09-19** 抓包查看器重绘优化：数据未变不碰 DOM，重绘后按「当前可见行」还原视口、恢复展开项及其内部滚动位置
 - **2026-09-19** 指纹清理开关（`router.strip_cc_banner`）：删 system 中的 CC / Agent SDK 身份句 + billing 头块，`cache_control` 顺延，抓包显示删除块数；**五档各自独立开关**（旧布尔配置自动迁移为主档 + fast 档）
 - **2026-09-19** `POST /api/route` 读-改-写全程串行 + 配置原子写回（`.tmp` → `replace`），修五档连点丢更新；`tier_efforts` 改仅接受合法强度值
+- **2026-09-20** 新增 **Gemini / Antigravity 上游**（`:8045`）：第四个 route `antigravity`（兼容别名 `gemini`），hybrid 五档可混搭三个上游，`gemini-*` 由模型名前缀认领，`/api/probe` 可只读探测
+- **2026-09-20** **请求改写模式三态**：全局 `router.modifier_mode` + 五档 `router.tier_modifier`（`original` / `builtin` / `custom`），直连 Gemini 走 `router.gemini_modifier`
+- **2026-09-20** 新增连接配置页与 `GET/POST /api/config`、`POST /api/upstream`；上游凭据集中在中转，页面只显示固定掩码、留空保持不变
+- **2026-09-20** 抓包查看器显示 prompt-cache 命中率；Gemini 3.7 模型与配色修正
 
 ---
 

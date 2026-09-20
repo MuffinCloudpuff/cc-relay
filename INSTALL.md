@@ -17,6 +17,7 @@
 | 网络 | 能直连 `api.deepseek.com` | DeepSeek 直连，不需要代理 |
 | 代理（可选） | 本机 HTTP 代理 | 只有要接 **Codex/GPT** 才需要，例如 Clash 的 `127.0.0.1:7897` |
 | ChatGPT 账号（可选） | 有 Codex 额度 | 同上，用 OAuth 登录，不消耗 API key |
+| Antigravity Tools（可选） | 工具在本机监听 `127.0.0.1:8045` | 只有要接 **Gemini** 才需要，见第 3.5 节 |
 
 **只想用 DeepSeek**：跳过第 3 节，`config.json` 里把 `route` 设成 `"deepseek"` 即可，不需要 CLIProxyAPI。
 
@@ -114,11 +115,15 @@ copy config.example.json config.json
 | `codex_exe` | `cli-proxy-api.exe` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\cli-proxy-api.exe` |
 | `codex_config` | `config.yaml` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\config.yaml` |
 | `antigravity_key` | Antigravity 本地兼容接口的访问 key，不是 Claude Code 假 key |
-| `antigravity_exe` | Antigravity Tools 可执行文件路径；仅在 `tools.antigravity.auto_start` 开启时用于懒启动 |
+| `antigravity_exe` | Antigravity Tools 可执行文件路径；仅在 `tools.antigravity.auto_start` 开启时用于懒启动（该项由 `lifecycle.py` 读取，默认 `true`） |
 | `record_dir` | 预留字段，当前版本未使用（记录固定写到项目目录的 `records.jsonl`） |
 | `max_body_capture` | 单条记录最多抓多少字节请求体，默认 2000000 |
 | `upstreams.*` | 上游地址。DeepSeek 用 `/anthropic` 结尾的兼容端点；Codex 指向 `http://127.0.0.1:8317`；Gemini/Antigravity 指向 `http://127.0.0.1:8045`（不要附加 `/v1`） |
 | `router` | 路由与档位，见 [第 7 节](#7-混合模式怎么配) |
+| `router.hybrid_codex_model` / `hybrid_deepseek_model` / `hybrid_antigravity_model` | hybrid 下三个上游各自的**兜底目标模型**（档位没配时用它）；`hybrid_antigravity_model` 同时参与「要不要拉起 Gemini 上游」的判断 |
+| `router.modifier_mode` | 全局请求改写模式：`original` / `builtin` / `custom`。只对**没有命中任何档位**的请求生效 |
+| `router.tier_modifier` | 五档各自的改写模式（`main` / `opus` / `sonnet` / `fast` / `agent`）；命中该档时优先于全局，**没配的档按原版透传** |
+| `router.gemini_modifier` | 非 hybrid（全部走 Gemini 上游）时的改写模式：`original` / `builtin`，默认 `builtin` |
 
 > 只想用 DeepSeek：把 `router.route` 改成 `"deepseek"`，`codex_exe` / `codex_config` / `codex_proxy_key` 可以留空。
 > ⚠️ JSON 里 Windows 路径要写成双反斜杠 `C:\\cc-relay\\...`，或改成正斜杠 `C:/cc-relay/...`。
@@ -244,6 +249,20 @@ setx ANTHROPIC_SMALL_FAST_MODEL "FAST_MODEL[1m]"
 
 **指纹清理（`strip_cc_banner`）**：五档各自一个开关，某档开启后只对命中该档的请求做一次 body 改写——删掉 system 里整块的 CC / Agent SDK 身份句（`You are Claude Code, Anthropic's official CLI for Claude.` 或 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`）和 `x-anthropic-billing-header:` 开头的 billing 指纹块，身份句混在别的文本里则只摘句子；被删块的 `cache_control` 会顺延给其后最近的幸存块（该处已有断点就不动，被删的是尾块则向前落），不会白白丢 prompt-cache 断点。UI 上就是每张档位卡右上角那个小开关，也可以 `curl -d '{"strip_cc_banner":{"main":true}}'` 按档改；传单个 `true`/`false` 等价于只改 `main`（旧的单值配置也会自动迁移为主档 + fast 档）。抓包列表里该请求会显示删了几块。
 
+**请求改写模式（`modifier_mode` / `tier_modifier`）**：每档一个三态选择，决定转发前怎么处理 system：
+
+| 取值 | 行为 |
+|---|---|
+| `original` | **原版纯透传**：不动 body、不改请求头、不做指纹过滤 |
+| `builtin` | **内置清理**：删掉 CC / Agent SDK 身份句与 `x-anthropic-billing-header` 块 |
+| `custom` | **自定义**：用 UI「提示词」页面给该档配置的 system 替换（保留 prompt-cache 断点） |
+
+- 命中档位时（`hybrid:*`）以 `tier_modifier` 为准；**该档没显式配置 = 原版透传**（不会掉进全局 `custom`）
+- 只有没命中档位的请求才回退到全局 `router.modifier_mode`（默认 `custom`，此模式下会热重载执行 `custom_modifier.py` 里的 `modify_body` / `modify_headers`）
+- 全部走 Gemini 上游（非 hybrid）时由 `router.gemini_modifier` 单独控制，默认 `builtin`
+- UI 上就是每张档位卡右上角那个三选框；也可以 `curl -d '{"tier_modifier":{"opus":"builtin"}}'` 只改传进来的档位
+- `strip_cc_banner` 依然有效：`builtin` 模式必定执行内置清理；`custom` 模式下若自定义修改器缺失或抛错，会按该档的 `strip_cc_banner` 开关回退到内置清理
+
 **档位怎么落到 CC 上**：
 
 | 档位 | CC 发出的名字 | 什么时候用 | 经验配法 |
@@ -254,7 +273,7 @@ setx ANTHROPIC_SMALL_FAST_MODEL "FAST_MODEL[1m]"
 | `fast` | `FAST_MODEL` | 后台小调用（起标题等） | 最便宜，`instant` 强度 |
 | `agent` | 任意占位名 + 子代理特征 | 子代理 / Claude Agent SDK | 按钱包决定 |
 
-上游由**模型名前缀**决定：`gpt-*` → Codex，其余 → DeepSeek。所以任意档位都能填任一上游的模型，混搭是允许的。
+上游按**模型名**判定，顺序是：`config.json` 里的 `model_routes` 显式指定 → 内置模型表 → 前缀回退（`gpt-*` → Codex、`deepseek-*` → DeepSeek、`gemini-*` → Gemini/Antigravity）。**认不出来的模型不会被静默塞给 DeepSeek**。所以任意档位都能填任一上游的模型，混搭是允许的。
 
 **推理强度**取值 `off` / `on` / `instant` / `low` / `medium` / `high` / `xhigh` / `max`，会注入到请求体的 `thinking` 参数（`instant`=512、`low`=2048、`medium`=8192、`high`=16384、`xhigh`=32768、`max`=65536 tokens）。
 
