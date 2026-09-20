@@ -27,6 +27,27 @@ def load_relay_conf(conf_path=None):
     return {}
 
 
+def is_loopback_host(host):
+    h = str(host or "").strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1", "ip6-localhost")
+
+
+def _sanitize_dict_for_preview(val):
+    if isinstance(val, dict):
+        out = {}
+        sensitive_substrings = ("key", "token", "secret", "password", "credential")
+        for k, v in val.items():
+            lower_k = str(k).lower()
+            if any(s in lower_k for s in sensitive_substrings):
+                out[k] = "<redacted>" if v else ""
+            else:
+                out[k] = _sanitize_dict_for_preview(v)
+        return out
+    elif isinstance(val, list):
+        return [_sanitize_dict_for_preview(x) for x in val]
+    return val
+
+
 def main():
     parser = argparse.ArgumentParser(description="Inject cc-relay settings into ~/.claude/settings.json")
     parser.add_argument("--config", default=None, help="Path to cc-relay config.json")
@@ -36,6 +57,9 @@ def main():
 
     conf = load_relay_conf(args.config)
     host = conf.get("listen_host", "127.0.0.1")
+    if not is_loopback_host(host):
+        print(f"[ERROR] 拒绝将非本地回环地址 ({host}) 注入 Claude 配置，保护本地安全。")
+        sys.exit(1)
     port = conf.get("listen_port", 8400)
     fake_key = conf.get("fake_api_key", "sk-relay-local-0000")
 
@@ -74,7 +98,8 @@ def main():
     if args.dry_run:
         print("=== [DRY RUN] 目标文件预览 ===")
         print(f"目标路径: {settings_path}")
-        print(output_str)
+        sanitized = _sanitize_dict_for_preview(data)
+        print(json.dumps(sanitized, ensure_ascii=False, indent=2))
         return
 
     tmp_path = settings_path + ".tmp"
@@ -86,7 +111,7 @@ def main():
     print("[OK] 已成功将 cc-relay 环境变量安全增量写入 Claude 配置文件:")
     print(f"     {settings_path}")
     print(f"     中转地址: http://{host}:{port}")
-    print(f"     Token:   {fake_key}")
+    print(f"     Token:   <redacted>")
     print("     已保留所有其他既有环境变量与配置项。")
     print("=" * 64)
 

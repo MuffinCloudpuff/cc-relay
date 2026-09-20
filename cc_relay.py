@@ -45,33 +45,60 @@ def _save_conf(conf):
     os.replace(tmp, CONF)
 
 
-_KEY_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+UPSTREAM_ALLOWED_KEYS = {
+    "deepseek": {"real_deepseek_key", "deepseek_key"},
+    "codex": {"codex_proxy_key", "codex_key"},
+    "antigravity": {"antigravity_key", "gemini_key"},
+    "gemini": {"antigravity_key", "gemini_key"},
+}
+
+UPSTREAM_CANONICAL_KEYS = {
+    "deepseek": "real_deepseek_key",
+    "codex": "codex_proxy_key",
+    "antigravity": "antigravity_key",
+    "gemini": "antigravity_key",
+}
 
 
-def _safe_key_env_name(value):
-    """Return a config key name only when it cannot itself be a credential."""
-    value = str(value or "")
-    return value if _KEY_ENV_NAME_RE.fullmatch(value) else ""
+def is_loopback_host(host):
+    """Only allow loopback addresses for local security."""
+    h = str(host or "").strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1", "ip6-localhost")
+
+
+def _canonical_key_field(upstream_name):
+    return UPSTREAM_CANONICAL_KEYS.get(str(upstream_name or "").strip().lower(), "")
+
+
+def _safe_key_env_name(upstream_name, value):
+    """Return an allowed config field name for the given upstream, or empty string."""
+    val = str(value or "").strip()
+    allowed = UPSTREAM_ALLOWED_KEYS.get(str(upstream_name or "").strip().lower(), set())
+    return val if val in allowed else ""
 
 
 def _repair_misplaced_upstream_key(conf):
     """Recover a key pasted into upstream.key_env by an older/broken UI.
 
     key_env is metadata naming a top-level config field, never a place to keep
-    the credential itself. A malformed value (for example a key containing a
-    hyphen) cannot be an environment-style config key, so move it to the
-    conventional provider key field without logging or returning the value.
+    the credential itself. If key_env is not an allowed field name, migrate
+    the misplaced secret into the canonical provider key field (if not already set)
+    and reset key_env to the canonical field name.
     """
     changed = False
     for name, upstream in (conf.get("upstreams") or {}).items():
         if not isinstance(upstream, dict):
             continue
-        key_env = str(upstream.get("key_env") or "")
-        if not key_env or _safe_key_env_name(key_env):
+        key_env = str(upstream.get("key_env") or "").strip()
+        target = _canonical_key_field(name)
+        if not target:
             continue
-        target = "antigravity_key" if name in ("antigravity", "gemini") else f"{name}_key"
-        if not str(conf.get(target) or "").strip():
-            conf[target] = key_env
+        safe_field = _safe_key_env_name(name, key_env)
+        if safe_field:
+            continue
+        if key_env and not str(conf.get(target) or "").strip():
+            if key_env not in ("fake_api_key", target):
+                conf[target] = key_env
         upstream["key_env"] = target
         changed = True
     return changed
@@ -116,7 +143,7 @@ def _config_public_view(conf):
     for name, upstream in (conf.get("upstreams") or {}).items():
         if not isinstance(upstream, dict):
             continue
-        key_env = _safe_key_env_name(upstream.get("key_env"))
+        key_env = _safe_key_env_name(name, upstream.get("key_env")) or _canonical_key_field(name)
         key = conf.get(key_env, "") if key_env else ""
         upstreams[str(name)] = {
             "base": str(upstream.get("base") or ""),
@@ -155,16 +182,15 @@ def _apply_config_update(conf, data):
                 upstream["proxy_url"] = _normalize_config_url(
                     patch["proxy_url"], f"upstreams.{name}.proxy_url",
                     allow_empty=True, allow_direct=True)
-            key_env = _safe_key_env_name(upstream.get("key_env"))
+            key_env = _safe_key_env_name(name, upstream.get("key_env")) or _canonical_key_field(name)
             if not key_env:
                 raise ValueError(f"upstreams.{name} has an invalid key_env")
+            upstream["key_env"] = key_env
             if "key" in patch:
                 key = patch["key"]
                 if not isinstance(key, str):
                     raise ValueError(f"upstreams.{name}.key must be a string")
                 if key.strip() and key.strip() != _CONFIG_KEY_MASK:
-                    if not key_env:
-                        raise ValueError(f"upstreams.{name} has no key_env")
                     candidate[key_env] = key.strip()
 
     _save_conf(candidate)
@@ -201,10 +227,24 @@ def _rotate_if_needed():
         pass
 
 
+def _sanitize_headers_for_record(headers):
+    if not isinstance(headers, dict):
+        return headers
+    clean = {}
+    for k, v in headers.items():
+        if str(k).lower() in ("authorization", "x-api-key"):
+            clean[k] = "<redacted>"
+        else:
+            clean[k] = v
+    return clean
+
+
 def record(entry):
     with LOCK:
         _IDX[0] += 1
         entry["idx"] = _IDX[0]
+        if "headers" in entry and isinstance(entry["headers"], dict):
+            entry["headers"] = _sanitize_headers_for_record(entry["headers"])
         with open(RECORDS, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         # 实时轮转: 每条都检查(用缓存值快速跳过)
@@ -359,8 +399,17 @@ def _upstream_conf(conf, name):
     return ups.get(name) or {}
 
 
-def _key_for(conf, up):
-    return conf.get(_safe_key_env_name(up.get("key_env")), "") or ""
+def _key_for(conf, up, name=None):
+    if not isinstance(up, dict):
+        return ""
+    field = up.get("key_env")
+    if name:
+        field = _safe_key_env_name(name, field) or _canonical_key_field(name)
+    else:
+        all_allowed = set().union(*UPSTREAM_ALLOWED_KEYS.values())
+        if field not in all_allowed:
+            return ""
+    return conf.get(field, "") or ""
 
 
 def provider_for_model(model, conf=None):
@@ -396,7 +445,7 @@ def probe_upstream(conf, name="antigravity", timeout=6):
         return {"name": actual, "available": False, "error": "missing base"}
     try:
         req = urllib.request.Request(base + "/v1/models", method="GET")
-        key = _key_for(conf, up)
+        key = _key_for(conf, up, actual)
         if key:
             req.add_header("Authorization", "Bearer " + key)
             req.add_header("x-api-key", key)
@@ -416,11 +465,11 @@ def live_models(conf, ttl=120):
     if now - _MODELS_CACHE["ts"] < ttl:
         return _MODELS_CACHE
     ds = _fetch_models((_upstream_conf(conf, "deepseek")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "deepseek")), prefix="deepseek-")
+                       _key_for(conf, _upstream_conf(conf, "deepseek"), "deepseek"), prefix="deepseek-")
     cx = _fetch_models((_upstream_conf(conf, "codex")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "codex")), prefix="gpt-")
+                       _key_for(conf, _upstream_conf(conf, "codex"), "codex"), prefix="gpt-")
     gm = _fetch_models((_upstream_conf(conf, "antigravity")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "antigravity")), prefix="gemini-")
+                       _key_for(conf, _upstream_conf(conf, "antigravity"), "antigravity"), prefix="gemini-")
     if not ds:
         ds = list(DEEPSEEK_MODELS)
     if not cx:
@@ -1189,7 +1238,7 @@ class Relay(BaseHTTPRequestHandler):
             if lk in ("host", "content-length", "connection", "authorization", "x-api-key", "accept-encoding"):
                 continue
             fwd[k] = v
-        key = conf.get(up.get("key_env") or "", "") or ""
+        key = _key_for(conf, up, up_name)
         if key:
             fwd["x-api-key"] = key
             fwd["authorization"] = "Bearer " + key
@@ -1612,6 +1661,8 @@ class UIHandler(BaseHTTPRequestHandler):
 
 def serve_ui(conf):
     host = conf.get("listen_host", "127.0.0.1")
+    if not is_loopback_host(host):
+        raise ValueError(f"Refusing to bind UI to non-loopback host '{host}'.")
     port = conf.get("ui_port", 8610)
     srv = ThreadingHTTPServer((host, port), UIHandler)
     print(f"cc-relay UI on http://{host}:{port}")
@@ -1621,6 +1672,8 @@ def serve_ui(conf):
 def serve(a):
     conf = load_conf()
     host = conf.get("listen_host", "127.0.0.1")
+    if not is_loopback_host(host):
+        raise ValueError(f"Refusing to bind relay to non-loopback host '{host}'.")
     port = conf.get("listen_port", 8400)
     srv = ThreadingHTTPServer((host, port), Relay)
     srv.reload_conf = lambda: load_conf()
@@ -1633,7 +1686,9 @@ def serve(a):
     for n, u in (conf.get("upstreams") or {}).items():
         print(f"  [{n}] -> {u.get('base')}")
     print(f"  records: {RECORDS}")
-    print(f"  CC: ANTHROPIC_BASE_URL=http://{host}:{port}  ANTHROPIC_AUTH_TOKEN={conf.get('fake_api_key')}")
+    fake_key = conf.get("fake_api_key")
+    masked_key = _mask_config_key(fake_key) if fake_key else "<none>"
+    print(f"  CC: ANTHROPIC_BASE_URL=http://{host}:{port}  ANTHROPIC_AUTH_TOKEN={masked_key}")
     srv.serve_forever()
 
 
@@ -1665,15 +1720,27 @@ def last(a):
         print("msgs:", len(b.get("messages") or []), "tools:", len(b.get("tools") or []))
 
 
+def _redact_record_for_cli(rec):
+    if not isinstance(rec, dict):
+        return rec
+    r = json.loads(json.dumps(rec, ensure_ascii=False))
+    headers = r.get("headers")
+    if isinstance(headers, dict):
+        for k in list(headers.keys()):
+            if k.lower() in ("authorization", "x-api-key"):
+                headers[k] = "<redacted>"
+    return r
+
+
 def dump(a):
     recs = read_records()
     if a.which == "all":
         for r in recs[-20:]:
-            print(json.dumps(r, ensure_ascii=False, indent=1)[:4000])
+            print(json.dumps(_redact_record_for_cli(r), ensure_ascii=False, indent=1)[:4000])
     else:
         for r in recs:
             if str(r.get("idx")) == a.which:
-                print(json.dumps(r, ensure_ascii=False, indent=1)); return
+                print(json.dumps(_redact_record_for_cli(r), ensure_ascii=False, indent=1)); return
         print("未找到 #%s" % a.which)
 
 
