@@ -1,17 +1,18 @@
 # cc-relay
 
-**Claude Code 双上游统一中转** —— 让 Claude Code 同时接入 DeepSeek 与 Codex，按档位/模型名智能路由，带档位级推理强度与实时流量统计 + 抓包查看器。
+**Claude Code 多上游统一中转** —— 让 Claude Code 同时接入 DeepSeek、Codex 与 Gemini（Antigravity），按档位/模型名智能路由，带档位级推理强度与实时流量统计 + 抓包查看器。
 
 ```
 Claude Code ──(假 sk)──▶ cc-relay :8400 ──┬──▶ DeepSeek API（直连）
-                        （持真实 key）      └──▶ CLIProxyAPI :8317 ──▶ Codex（GPT）
+                        （持真实 key）      ├──▶ CLIProxyAPI :8317 ──▶ Codex（GPT）
+                        │                   └──▶ Antigravity :8045 ──▶ Gemini
 ```
 
 ---
 
 ## 特性
 
-- **双上游统一入口**：Claude Code 只连本地中转（用假 key），凭据集中在中转，不落 CC 配置
+- **多上游统一入口**：Claude Code 只连本地中转（用假 key），凭据集中在中转，不落 CC 配置
 - **五档位路由**：按 CC 的身份档位（主模型 / OPUS / SONNET / FAST / 子代理）分别路由到不同模型
 - **运行时热切换**：UI 上改路由，**运行中的 CC 下一个请求即生效**，无需重启
 - **档位级推理强度**：全局或每档单独设 effort，注入到请求体的 `thinking` 参数
@@ -33,9 +34,10 @@ Claude Code ──(假 sk)──▶ cc-relay :8400 ──┬──▶ DeepSeek A
                               ▼
                     ┌───────────────────┐
                     │  cc-relay  :8400  │  按 router.route 路由
-                    │  （持真实 key）    │  · hybrid   按档位分发（5 档）
-                    └─────────┬─────────┘  · deepseek 全部走 DS
-                              │            · codex    全部走 Codex
+                    │  （持真实 key）    │  · hybrid      按档位分发（5 档）
+                    └─────────┬─────────┘  · deepseek    全部走 DS
+                              │            · codex       全部走 Codex
+                              │            · antigravity 全部走 Gemini
               ┌───────────────┴───────────────┐
               ▼                               ▼
    ┌────────────────────┐        ┌──────────────────────┐
@@ -137,13 +139,14 @@ python lifecycle.py stopall     # 全部停止
 
 ## 路由机制
 
-### 三种路由策略（`router.route`）
+### 四种路由策略（`router.route`）
 
 | route | 含义 |
 |---|---|
-| `hybrid` | **默认**。按 CC 档位分发：OPUS 档 → 高价值模型，其余 → 各档配置的模型 |
+| `hybrid` | **默认**。按 CC 档位分发：每档可选择 DeepSeek、Codex 或 Gemini |
 | `deepseek` | 全部请求 → DeepSeek（可指定具体模型） |
 | `codex` | 全部请求 → Codex（可指定具体模型） |
+| `antigravity`（兼容别名 `gemini`） | 全部请求 → Gemini / Antigravity :8045（可指定具体模型） |
 
 ### 档位映射（hybrid）
 
@@ -155,7 +158,7 @@ python lifecycle.py stopall     # 全部停止
 | FAST | `FAST_MODEL[1m]` / `claude-haiku` | 后台小调用 | `deepseek-flash` | `hybrid:fast` |
 | 子代理 | 任意占位名 + 子代理特征 | Claude Agent SDK / 子代理 | `deepseek-flash` | `hybrid:agent` |
 
-- 上游由**所选模型名**自动判定：`gpt-*` → Codex，其余 → DeepSeek。
+- 上游由模型注册/模型名判定：`gpt-*` → Codex，`deepseek-*` → DeepSeek，`gemini-*` → Gemini/Antigravity；未知模型不会再静默归入 DeepSeek。
 - CC 直接发真实 Codex 模型名（如 `gpt-5.6-sol`）时原样透传（`hybrid:gpt-direct`）。
 - **子代理识别**（`hybrid:agent`）：请求头带 `x-claude-code-agent-id`，或 system 里含 `cc_is_subagent=true` / `Claude Agent SDK` / `You are a Claude agent`（主循环的 system 是 `You are Claude Code`，不冲突）。子代理档独立于主模型档，可单独省钱或单独升级。
 
@@ -165,8 +168,9 @@ python lifecycle.py stopall     # 全部停止
 |---|---|
 | DeepSeek | `deepseek-flash`、`deepseek-v4-pro` |
 | Codex | `gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-6-astra`、`gpt-5.5`、`gpt-5.3-codex-spark` |
+| Gemini | 从 Antigravity `:8045/v1/models` 实时发现 `gemini-*` 文本模型 |
 
-除内置表外，`/api/status` 会**运行时**从两个上游的 `/v1/models` 拉取真实可用模型（过滤图像类，120 秒缓存），UI 下拉即以实拉结果为准。
+除内置表外，`/api/status` 会**运行时**从三个上游的 `/v1/models` 拉取真实可用模型（过滤图像类，120 秒缓存），UI 下拉即以实拉结果为准。
 
 ### 推理强度（Effort）
 
@@ -192,12 +196,33 @@ python lifecycle.py stopall     # 全部停止
 
 打开 **http://127.0.0.1:8610**：
 
-- **路由卡片**：DeepSeek 直连 / Codex 全量 / 混合（含 5 档下拉）
+- **路由卡片**：DeepSeek 直连 / Codex 全量 / Gemini（Antigravity :8045）全量 / 混合（含 5 档下拉）
 - **模型推理强度**：全局 + 档位级 effort 选择
 - **指纹清理开关**：五张档位卡右上角各一个小开关，各自独立，只对命中该档（`hybrid:main` / `opus` / `sonnet` / `fast` / `agent`）的请求生效，切换后下一个请求即生效
-- **代理状态条**：Codex 上游运行状态与启停
+- **代理状态条**：Codex 8317 与 Gemini/Antigravity 8045 的运行状态
 - **📊 实时模型流量**：按上游 + 实际模型聚合
 - **🔍 抓包查看器**：逐条查看 CC 请求与路由决策，点行展开完整 headers/body/响应
+- **⚙️ 连接配置**：在页面内编辑所有已配置上游的 Base URL、API key 和代理地址；key 只显示固定掩码，留空保持不变，保存后下一次请求生效
+
+> 连接配置页会动态列出 `config.json` 中的所有 `upstreams`（例如 DeepSeek、Codex、Antigravity）。UI 默认只监听 `127.0.0.1`，不要把 UI 端口暴露到公网，否则访问者可以修改上游凭据。
+
+### Gemini / Antigravity 配置
+
+在 `config.json` 中保留本地网关配置（示例文件不包含真实 key）：
+
+```jsonc
+"antigravity_key": "<本地 Antigravity 访问 key>",
+"antigravity_exe": "<Antigravity Tools 可执行文件>",
+"upstreams": {
+  "antigravity": {
+    "base": "http://127.0.0.1:8045",
+    "key_env": "antigravity_key",
+    "proxy_url": "direct"
+  }
+}
+```
+
+`base` 必须填写到 `http://127.0.0.1:8045`，不要附加 `/v1`；中转会把 Claude Code 的 `/v1/messages` 原样转发到 Antigravity。Gemini 模型从 `/v1/models` 实时发现，8045 不可用时不会静默切换到其他上游。可通过 `GET /api/probe?name=antigravity` 做只读连通性探测。
 
 ---
 
@@ -206,11 +231,28 @@ python lifecycle.py stopall     # 全部停止
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/status` | 全部状态（路由、档位、模型列表、流量聚合、代理状态） |
+| GET | `/api/probe?name=antigravity` | 只读探测 Gemini/Antigravity 的 `/v1/models` 与消息路径，不发送对话 |
+| GET | `/api/config` | 获取所有已配置上游的 URL、代理信息与脱敏 key |
+| POST | `/api/config` | 更新所有已配置上游的 URL/key；中转入口配置不在页面中修改 |
 | POST | `/api/route` | 切换路由 / 档位模型 / 推理强度 / 指纹清理开关 |
 | POST | `/api/proxy` | 启动 / 停止 Codex 上游 |
 | POST | `/api/reset` | 流量清零 |
 | GET | `/api/calls?n=60` | 抓包摘要列表 |
 | GET | `/api/call?idx=N` | 单条调用完整内容 |
+
+`POST /api/config` 只接受已存在的上游名称；key 输入为空表示保持不变，页面没有清空 key 的操作。响应中的 key 永远是固定掩码，不返回原文。示例：
+
+```json
+{
+  "upstreams": {
+    "deepseek": {
+      "base": "https://api.deepseek.com/anthropic",
+      "proxy_url": "direct",
+      "key": ""
+    }
+  }
+}
+```
 
 `GET /api/status` 关键字段：
 
@@ -219,6 +261,7 @@ python lifecycle.py stopall     # 全部停止
   "route": "hybrid",
   "models_ds": ["deepseek-flash", "deepseek-v4-pro"],        // 运行时实拉，120s 缓存
   "models_codex": ["gpt-5.6-sol", "..."],
+  "models_gemini": ["gemini-2.5-flash", "..."],
   "tiers":       { "main": "...", "opus": "...", "sonnet": "...", "fast": "...", "agent": "..." },
   "tier_env":    { "main": "ANTHROPIC_MODEL", "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
                    "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL", "fast": "ANTHROPIC_SMALL_FAST_MODEL",
@@ -227,7 +270,7 @@ python lifecycle.py stopall     # 全部停止
   "effort": "medium",
   "tier_efforts": { "main": "...", "opus": "...", "sonnet": "...", "fast": "...", "agent": "..." },
   "strip_cc_banner": { "main": true, "opus": false, "sonnet": false, "fast": true, "agent": false },
-  "proxy_running": true, "codex_up": true,
+  "proxy_running": true, "codex_up": true, "antigravity_up": true,
   "rows": [{ "route": "deepseek", "model": "deepseek-flash", "sent": "...", "req": 5, "ok": 5, "err": 0, "last": 12 }],
   "total": 8
 }
@@ -243,6 +286,10 @@ curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json"
             "fast":"deepseek-flash","agent":"gpt-5.6-sol"},
   "tier_efforts": {"main":"medium","opus":"medium","sonnet":"instant","fast":"instant","agent":"medium"}
 }'
+
+# 全部走 Gemini（Antigravity :8045）
+curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json" \
+  -d '{"route":"antigravity","model":"gemini-2.5-flash"}'
 
 # 只开某档的指纹清理（路由/档位不变，按档合并）
 curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json" \

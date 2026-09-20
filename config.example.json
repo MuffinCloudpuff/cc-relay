@@ -9,6 +9,8 @@
   "codex_proxy_key": "your-codex-proxy-key-here",
   "codex_exe": "",
   "codex_config": "",
+  "antigravity_key": "",
+  "antigravity_exe": "",
   "upstreams": {
     "deepseek": {
       "base": "https://api.deepseek.com/anthropic",
@@ -19,10 +21,20 @@
       "base": "http://127.0.0.1:8317",
       "key_env": "codex_proxy_key",
       "proxy_url": "direct"
+    },
+    "antigravity": {
+      "base": "http://127.0.0.1:8045",
+      "key_env": "antigravity_key",
+      "proxy_url": "direct",
+      "provider": "gemini"
     }
+  },
+  "tools": {
+    "antigravity": {"auto_start": true, "stop_on_exit": false}
   },
   "router": {
     "route": "hybrid",
+    "hybrid_antigravity_model": "gemini-2.5-flash",
     "tiers": {
       "main": "deepseek-flash",
       "opus": "deepseek-flash",

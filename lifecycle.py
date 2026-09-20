@@ -8,6 +8,7 @@ cc-relay 生命周期管理 (被 claude wrapper 调用)
     status    : 打印状态
 """
 import os, sys, time, json, socket, subprocess
+from urllib.parse import urlparse
 
 BASE = os.environ.get("CC_RELAY_DIR") or os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(BASE, "config.json")
@@ -15,6 +16,7 @@ RELAY = os.path.join(BASE, "cc_relay.py")
 PYW = os.environ.get("CC_RELAY_PYTHONW") or sys.executable.replace("python.exe","pythonw.exe")
 PS = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 CODEX_PORT = 8317
+ANTIGRAVITY_PORT = int(os.environ.get("CC_RELAY_ANTIGRAVITY_PORT", "8045"))
 RELAY_PORT = 8400
 UI_PORT = 8610
 WATCH_PID = os.path.join(BASE, ".watch.pid")
@@ -29,6 +31,63 @@ def tcp(port, host="127.0.0.1", t=0.6):
 
 def relay_up():
     return tcp(RELAY_PORT)
+
+
+def _load_conf():
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def antigravity_port(conf=None):
+    conf = conf or _load_conf()
+    ups = conf.get("upstreams") or {}
+    u = ups.get("gemini") or ups.get("antigravity") or {}
+    try:
+        parsed = urlparse(u.get("base") or "")
+        return parsed.port or (443 if parsed.scheme == "https" else ANTIGRAVITY_PORT)
+    except Exception:
+        return ANTIGRAVITY_PORT
+
+
+def antigravity_up(conf=None):
+    return tcp(antigravity_port(conf))
+
+
+def antigravity_ensure(conf=None):
+    """只负责确保外部 Gemini sidecar 已启动, 不默认停止用户进程。"""
+    conf = conf or _load_conf()
+    if antigravity_up(conf):
+        return "already"
+    exe = (conf.get("antigravity_exe") or "").strip()
+    if not exe or not os.path.exists(exe):
+        return "no-exe"
+    try:
+        subprocess.Popen([exe], cwd=os.path.dirname(exe),
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return "start-failed"
+    for _ in range(40):
+        time.sleep(0.5)
+        if antigravity_up(conf):
+            return "started"
+    return "timeout"
+
+
+def _route_needs_gemini(conf):
+    rt = conf.get("router") or {}
+    route = str(rt.get("route") or "hybrid").lower()
+    if route in ("gemini", "antigravity"):
+        return True
+    if route != "hybrid":
+        return False
+    models = list((rt.get("tiers") or {}).values())
+    models += [rt.get("hybrid_antigravity_model")]
+    routes = conf.get("model_routes") or {}
+    return any(str(m or "").lower().startswith("gemini-") or routes.get(m) in ("gemini", "antigravity")
+               for m in models)
 
 
 def _pythonw_pids_like(needle):
@@ -122,7 +181,17 @@ def _watch_alive():
 
 
 def cmd_autostart():
+    conf = _load_conf()
     started = relay_start()
+    ag_result = "skipped"
+    tools = conf.get("tools") or {}
+    ag_auto = (tools.get("antigravity") or {}).get("auto_start", True)
+    if ag_auto and _route_needs_gemini(conf) and not os.environ.get("CC_RELAY_SKIP_TOOLS"):
+        ag_result = antigravity_ensure(conf)
+    # relay 启动成功仍返回原有语义; Gemini 状态通过 status/JSON 诊断。
+    if os.environ.get("CC_RELAY_STATUS_JSON") == "1":
+        print(json.dumps({"ok": relay_up(), "relay": "started" if started else "already_running",
+                          "antigravity": ag_result, "antigravity_up": antigravity_up(conf)}, ensure_ascii=False))
     return 0 if started else 3
 
 
@@ -169,8 +238,10 @@ def cmd_stopall():
 
 
 def cmd_status():
+    conf = _load_conf()
     print(json.dumps({"relay_up": relay_up(), "ui_up": tcp(UI_PORT),
-                      "codex_up": tcp(CODEX_PORT), "claude_procs": claude_count()}, ensure_ascii=False))
+                      "codex_up": tcp(CODEX_PORT), "antigravity_up": antigravity_up(conf),
+                      "gemini_up": antigravity_up(conf), "claude_procs": claude_count()}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
