@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 CC 统一中转 (unified relay)
-- Claude Code 用假 sk 连本服务; 本服务持真实 key, 按 model 名路由到双上游:
-    deepseek -> https://api.deepseek.com/anthropic (直连)
-    codex    -> CLIProxyAPI 127.0.0.1:8317 (Codex 额度, 需 clash; 随需自动拉起)
+- Claude Code 用假 sk 连本服务; 本服务持真实 key, 按 model 名路由到多上游:
+    deepseek     -> https://api.deepseek.com/anthropic (直连)
+    codex        -> CLIProxyAPI 127.0.0.1:8317 (Codex 额度, 需 clash; 随需自动拉起)
+    antigravity  -> Antigravity Tools 127.0.0.1:8045 (Gemini, 随需自动拉起)
 - 完整 dump 每次请求 (headers/body/路由决策/响应) 供分析
 - 纯 stdlib
 
@@ -39,6 +40,98 @@ def _save_conf(conf):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(conf, f, ensure_ascii=False, indent=2)
     os.replace(tmp, CONF)
+
+
+_CONFIG_KEY_MASK = "••••••••"
+
+
+def _mask_config_key(value):
+    """只向 UI 暴露固定掩码, 不泄露 key 长度或内容。"""
+    return _CONFIG_KEY_MASK if value else ""
+
+
+def _normalize_config_url(value, field, allow_empty=False, allow_direct=False):
+    """校验并规范化配置页提交的 URL。"""
+    from urllib.parse import urlsplit
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    value = value.strip()
+    if not value:
+        if allow_empty:
+            return ""
+        raise ValueError(f"{field} cannot be empty")
+    if allow_direct and value.lower() == "direct":
+        return "direct"
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{field} contains control characters")
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise ValueError(f"{field} is invalid")
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{field} must be an http(s) URL")
+    if not parsed.hostname:
+        raise ValueError(f"{field} must include a host")
+    return value.rstrip("/")
+
+
+def _config_public_view(conf):
+    """返回配置页所需的非敏感配置快照。"""
+    upstreams = {}
+    for name, upstream in (conf.get("upstreams") or {}).items():
+        if not isinstance(upstream, dict):
+            continue
+        key_env = str(upstream.get("key_env") or "")
+        key = conf.get(key_env, "") if key_env else ""
+        upstreams[str(name)] = {
+            "base": str(upstream.get("base") or ""),
+            "proxy_url": str(upstream.get("proxy_url") or ""),
+            "key_env": key_env,
+            "key_mask": _mask_config_key(key),
+            "has_key": bool(key),
+        }
+    return {"upstreams": upstreams}
+
+
+def _apply_config_update(conf, data):
+    """校验并合并配置页更新, 返回新的非敏感快照。"""
+    if not isinstance(data, dict):
+        raise ValueError("request body must be an object")
+    candidate = json.loads(json.dumps(conf, ensure_ascii=False))
+
+    updates = data.get("upstreams")
+    if updates is not None:
+        if not isinstance(updates, dict):
+            raise ValueError("upstreams must be an object")
+        configured = candidate.get("upstreams") or {}
+        unknown = set(updates) - set(configured)
+        if unknown:
+            raise ValueError("unknown upstream: " + ", ".join(sorted(map(str, unknown))))
+        for name, patch in updates.items():
+            if not isinstance(patch, dict):
+                raise ValueError(f"upstreams.{name} must be an object")
+            upstream = configured[name]
+            if not isinstance(upstream, dict):
+                raise ValueError(f"upstreams.{name} is invalid")
+            if "base" in patch:
+                upstream["base"] = _normalize_config_url(
+                    patch["base"], f"upstreams.{name}.base")
+            if "proxy_url" in patch:
+                upstream["proxy_url"] = _normalize_config_url(
+                    patch["proxy_url"], f"upstreams.{name}.proxy_url",
+                    allow_empty=True, allow_direct=True)
+            key_env = str(upstream.get("key_env") or "")
+            if "key" in patch:
+                key = patch["key"]
+                if not isinstance(key, str):
+                    raise ValueError(f"upstreams.{name}.key must be a string")
+                if key.strip() and key.strip() != _CONFIG_KEY_MASK:
+                    if not key_env:
+                        raise ValueError(f"upstreams.{name} has no key_env")
+                    candidate[key_env] = key.strip()
+
+    _save_conf(candidate)
+    return _config_public_view(candidate)
 
 
 MAX_RECORD_BYTES = 1024 * 1024 * 1024   # 1 GB 上限
@@ -110,6 +203,17 @@ def codex_up():
     return _tcp(8317)
 
 
+def antigravity_up(conf=None):
+    """Gemini sidecar health check; port derives from configured base when possible."""
+    try:
+        import urllib.parse as _urlparse
+        base = (_upstream_conf(conf or load_conf(), "antigravity").get("base") or "http://127.0.0.1:8045")
+        u = _urlparse.urlparse(base)
+        return _tcp(u.port or (443 if u.scheme == "https" else 80), u.hostname or "127.0.0.1")
+    except Exception:
+        return _tcp(8045)
+
+
 def codex_start(conf):
     if codex_up():
         return "already"
@@ -130,6 +234,25 @@ def codex_start(conf):
     return "timeout"
 
 
+def antigravity_start(conf):
+    """按配置懒启动 Antigravity Tools; 已运行时不重复拉起。"""
+    if antigravity_up(conf):
+        return "already"
+    exe = (conf.get("antigravity_exe") or "").strip()
+    if not exe or not os.path.exists(exe):
+        return "no-exe"
+    try:
+        subprocess.Popen([exe], cwd=os.path.dirname(exe),
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return "start-failed"
+    for _ in range(40):
+        time.sleep(0.5)
+        if antigravity_up(conf):
+            return "started"
+    return "timeout"
+
+
 def codex_stop():
     try:
         subprocess.run(["taskkill", "/F", "/IM", "cli-proxy-api.exe"], capture_output=True,
@@ -144,9 +267,12 @@ def codex_stop():
 CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.5",
                 "gpt-5.3-codex-spark"]
 DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
-ALL_MODELS = DEEPSEEK_MODELS + CODEX_MODELS
+# Antigravity 8045 的运行时模型优先; 这些只用于上游不可用时的安全回退。
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
+ALL_MODELS = DEEPSEEK_MODELS + CODEX_MODELS + GEMINI_MODELS
 DEFAULT_CODEX_MAP = "gpt-5.6-sol"
 DEFAULT_DS_MAP = "deepseek-flash"
+DEFAULT_GEMINI_MAP = "gemini-2.5-flash"
 # 推理强度 -> 请求 body 的 thinking 参数
 # 档位依据: GPT-5.6 API 支持 none/low/medium/high/xhigh/max; 经 CLIProxyAPI 转换后
 #   budget 阈值映射到 codex 的 reasoning effort(本地实测 xhigh/32768 触发思考 token)
@@ -163,47 +289,113 @@ REASONING_MAP = {
 EFFORT_VALUES = tuple(REASONING_MAP)
 REASONING_LABELS = {"off": "关闭", "on": "开启", "instant": "即时", "low": "低", "medium": "中",
                     "high": "高", "xhigh": "极高", "max": "最大"}
-_MODELS_CACHE = {"ts": 0, "ds": list(DEEPSEEK_MODELS), "cx": list(CODEX_MODELS)}
+_MODELS_CACHE = {"ts": 0, "ds": list(DEEPSEEK_MODELS), "cx": list(CODEX_MODELS),
+                 "gm": list(GEMINI_MODELS), "health": {}}
 
 
-def _fetch_models(base, key, timeout=6):
-    """从上游 /v1/models 拉模型名(过滤图像类)"""
+def _fetch_models(base, key, timeout=6, prefix=None):
+    """从上游 /v1/models 拉模型名(过滤图像类); 返回空表示上游不可用"""
+    if not base:
+        return []
     try:
         import urllib.request as _u
         req = _u.Request(base.rstrip("/") + "/v1/models")
         if key:
             req.add_header("Authorization", "Bearer " + key)
+            req.add_header("x-api-key", key)
         d = json.load(_u.urlopen(req, timeout=timeout))
         out = []
         for m in d.get("data", []):
             mid = m.get("id") or ""
             if "image" in mid or "auto-review" in mid:
                 continue
+            if prefix and not mid.startswith(prefix):
+                continue
             out.append(mid)
-        return sorted(out)
+        return sorted(set(out))
     except Exception:
         return []
 
 
+def _upstream_conf(conf, name):
+    """读取 provider 配置, 兼容旧配置里的 antigravity upstream 命名"""
+    ups = conf.get("upstreams") or {}
+    if name == "antigravity":
+        return ups.get("gemini") or ups.get("antigravity") or {}
+    return ups.get(name) or {}
+
+
+def _key_for(conf, up):
+    return conf.get(up.get("key_env") or "", "") or ""
+
+
+def provider_for_model(model, conf=None):
+    """显式模型归属优先, 前缀仅作兼容回退; 未知模型返回 None。"""
+    model = (model or "").strip()
+    if not model:
+        return None
+    conf = conf or {}
+    routes = conf.get("model_routes") or {}
+    if routes.get(model) in ("deepseek", "codex", "antigravity", "gemini"):
+        p = routes[model]
+        return "antigravity" if p == "gemini" else p
+    for p, values in (("deepseek", DEEPSEEK_MODELS), ("codex", CODEX_MODELS),
+                      ("antigravity", GEMINI_MODELS)):
+        if model in values:
+            return p
+    if model.startswith("gpt-"):
+        return "codex"
+    if model.startswith("deepseek-"):
+        return "deepseek"
+    if model.startswith("gemini-"):
+        return "antigravity"
+    return None
+
+
+def probe_upstream(conf, name="antigravity", timeout=6):
+    """只读探测模型端点，不发送对话请求，也不返回任何凭据。"""
+    import urllib.parse as _urlparse
+    actual = "antigravity" if name in ("gemini", "antigravity") else name
+    up = _upstream_conf(conf, actual)
+    base = (up.get("base") or "").rstrip("/")
+    if not base:
+        return {"name": actual, "available": False, "error": "missing base"}
+    try:
+        req = urllib.request.Request(base + "/v1/models", method="GET")
+        key = _key_for(conf, up)
+        if key:
+            req.add_header("Authorization", "Bearer " + key)
+            req.add_header("x-api-key", key)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.load(resp)
+        ids = [str(x.get("id") or "") for x in payload.get("data", []) if isinstance(x, dict)]
+        return {"name": actual, "available": True, "models": sorted(set(ids)),
+                "messages_path": base + "/v1/messages"}
+    except Exception as e:
+        return {"name": actual, "available": False, "error": str(e)[:240],
+                "messages_path": base + "/v1/messages"}
+
+
 def live_models(conf, ttl=120):
-    """实时模型列表(带缓存): 优先从各上游拉, 失败回退常量"""
+    """实时模型列表(带缓存): 优先从三上游拉, 失败回退各自常量"""
     now = time.time()
     if now - _MODELS_CACHE["ts"] < ttl:
         return _MODELS_CACHE
-    ups = conf.get("upstreams") or {}
-    ds = []
-    cx = []
-    u = ups.get("deepseek") or {}
-    ds = _fetch_models(u.get("base", ""), conf.get(u.get("key_env") or "", ""))
-    u = ups.get("codex") or {}
-    cx = _fetch_models(u.get("base", ""), conf.get(u.get("key_env") or "", ""))
-    # codex 上游(CLIProxyAPI)同时代理了 deepseek, 剔除其模型, 只保留 codex/gpt 系
-    cx = [m for m in cx if not m.startswith("deepseek-")]
+    ds = _fetch_models((_upstream_conf(conf, "deepseek")).get("base", ""),
+                       _key_for(conf, _upstream_conf(conf, "deepseek")), prefix="deepseek-")
+    cx = _fetch_models((_upstream_conf(conf, "codex")).get("base", ""),
+                       _key_for(conf, _upstream_conf(conf, "codex")), prefix="gpt-")
+    gm = _fetch_models((_upstream_conf(conf, "antigravity")).get("base", ""),
+                       _key_for(conf, _upstream_conf(conf, "antigravity")), prefix="gemini-")
     if not ds:
         ds = list(DEEPSEEK_MODELS)
     if not cx:
         cx = list(CODEX_MODELS)
-    _MODELS_CACHE.update({"ts": now, "ds": ds, "cx": cx})
+    if not gm:
+        gm = list(GEMINI_MODELS)
+    _MODELS_CACHE.update({"ts": now, "ds": ds, "cx": cx, "gm": gm,
+                          "health": {"deepseek": bool(ds), "codex": bool(cx),
+                                      "antigravity": bool(gm)}})
     return _MODELS_CACHE
 
 
@@ -531,11 +723,14 @@ _PROMPT_MGR = PromptManager()
 
 def pick_route(conf, method, path, headers, body_json, body_raw):
     """统一路由: 返回 (upstream_name, map_model|None, reason)
-    router.route = "hybrid" | "codex" | "deepseek"
-    router.model = 当 route 为 codex/deepseek 时的指定模型(可空=用默认)
+    router.route = "hybrid" | "codex" | "deepseek" | "antigravity"
+    router.model = 全量路由的指定模型(可空=用默认)
     """
     router = conf.get("router") or {}
-    route = (router.get("route") or "hybrid").strip()
+    route = (router.get("route") or "hybrid").strip().lower()
+    # 对外兼容更直观的 gemini 命名, 内部统一使用实际后端 antigravity。
+    if route == "gemini":
+        route = "antigravity"
     forced = (router.get("model") or "").strip()
     raw_model = ""
     if isinstance(body_json, dict):
@@ -546,18 +741,23 @@ def pick_route(conf, method, path, headers, body_json, body_raw):
         model = ""
 
     if route == "codex":
-        m = forced if forced in CODEX_MODELS else DEFAULT_CODEX_MAP
+        m = forced if provider_for_model(forced, conf) == "codex" else DEFAULT_CODEX_MAP
         return "codex", m, "route:codex"
     if route == "deepseek":
-        return "deepseek", (forced or None), "route:deepseek"
+        m = forced or DEFAULT_DS_MAP
+        return "deepseek", m, "route:deepseek"
+    if route == "antigravity":
+        m = forced or (router.get("hybrid_antigravity_model") or "").strip() or DEFAULT_GEMINI_MAP
+        return "antigravity", m, "route:antigravity"
 
     # hybrid: 高价值档(plan) -> 高价值模型; 其余按档位 -> 各自模型; 上游随所选模型决定
     hv = (router.get("hybrid_codex_model") or router.get("model") or "").strip() or DEFAULT_CODEX_MAP
     dd = (router.get("hybrid_deepseek_model") or "").strip() or DEFAULT_DS_MAP
-    # 四档位模型(hybrid 下)
+    gg = (router.get("hybrid_antigravity_model") or "").strip() or DEFAULT_GEMINI_MAP
+    # 五档位模型(hybrid 下)
     tier = router.get("tiers") or {}
     def _up(m):
-        return "codex" if m and m.startswith("gpt-") else "deepseek"
+        return provider_for_model(m, conf) or "deepseek"
     # OPUS 档(plan/复杂推理) -> 高价值模型
     if model in ("OPUS_MODEL", "claude-opus-5", "claude-opus-4-6"):
         m = (tier.get("opus") or hv).strip()
@@ -570,13 +770,15 @@ def pick_route(conf, method, path, headers, body_json, body_raw):
     if model in ("FAST_MODEL", "claude-haiku"):
         m = (tier.get("fast") or dd).strip()
         return _up(m), m, "hybrid:fast"
-    if model in CODEX_MODELS:
+    if provider_for_model(model, conf) == "codex":
         return "codex", model, "hybrid:gpt-direct"
+    if provider_for_model(model, conf) == "antigravity":
+        return "antigravity", model, "hybrid:antigravity-direct"
     # 子代理档(Claude Agent SDK, model=本地中转) -> 单独分流, 不并入主模型档
     if not model and _is_subagent(headers, body_json):
         m = (tier.get("agent") or dd).strip()
         return _up(m), m, "hybrid:agent"
-    # 主模型档 / 其余
+    # 主模型档 / 其余；默认保持旧配置的 DeepSeek 行为
     m = (tier.get("main") or dd).strip()
     return _up(m), m, "hybrid:main"
 
@@ -659,20 +861,22 @@ def stats_snapshot():
     rt = conf.get('router') or {}
     lm = live_models(conf)
     route = rt.get('route', 'hybrid')
-    # 兼容旧 UI 字段名
-    mode_map = {'hybrid': 'hybrid', 'deepseek': 'deepseek', 'codex': 'codex'}
+    if route == 'gemini':
+        route = 'antigravity'
+    # 兼容旧 UI 字段名，同时暴露 Gemini 独立模型桶。
     return {'route': route, 'mode': route,
             'model': rt.get('model', ''),
-            'models_ds': lm['ds'], 'models_codex': lm['cx'],
-            # 旧 UI 兼容别名
-            'deepseek_models': lm['ds'], 'codex_models': lm['cx'],
-            'all_models': lm['ds'] + lm['cx'],
+            'models_ds': lm['ds'], 'models_codex': lm['cx'], 'models_gemini': lm['gm'],
+            # 旧 UI / API 兼容别名
+            'deepseek_models': lm['ds'], 'codex_models': lm['cx'], 'gemini_models': lm['gm'],
+            'all_models': lm['ds'] + lm['cx'] + lm['gm'],
             'settings_model': rt.get('model', '') or '(自动)',
             'env_base': 'http://127.0.0.1:8400',
             'env_model': rt.get('model', '') or route,
             'codex_default_model': 'gpt-5.6-sol',
             'hybrid_codex_model': (rt.get('hybrid_codex_model') or rt.get('model') or '').strip() or 'gpt-5.6-sol',
             'hybrid_deepseek_model': (rt.get('hybrid_deepseek_model') or '').strip() or 'deepseek-flash',
+            'hybrid_antigravity_model': (rt.get('hybrid_antigravity_model') or '').strip() or DEFAULT_GEMINI_MAP,
             # 五档位模型(hybrid): main/opus/sonnet/fast/agent(子代理)
             'tiers': {
                 'main':   (rt.get('tiers') or {}).get('main')   or (rt.get('hybrid_deepseek_model') or 'deepseek-flash'),
@@ -695,6 +899,9 @@ def stats_snapshot():
             # 各档指纹清理开关(五张档位卡右上角)
             'strip_cc_banner': _strip_flags(rt),
             'modifier_mode': (rt.get('modifier_mode') or conf.get('modifier_mode') or 'custom').strip().lower(),
+            # 每档三态修改器: original(原版纯透传) / builtin(内置清理) / custom(自定义提示词); 空串=未显式配置, 回退全局
+            'tier_modifier': {k: str(((rt.get('tier_modifier') or {}).get(k)) or '').strip().lower() for k in TIER_KEYS},
+            'gemini_modifier': str(rt.get('gemini_modifier') or '').strip().lower(),
             'modifier_file_exists': os.path.exists(MODIFIER_FILE),
             'modifier_error': _MOD_MGR._err,
             'tier_efforts': {
@@ -708,7 +915,13 @@ def stats_snapshot():
             'hybrid_pins': {'ANTHROPIC_DEFAULT_OPUS_MODEL': 'gpt-5.6-sol'},
             'proxy_running': codex_up(),
             'rows': rows, 'total': len(recs),
-            'codex_up': codex_up(), 'last_up': _UP['last'], 'last_model': _UP['last_model']}
+            'codex_up': codex_up(), 'antigravity_up': antigravity_up(conf),
+            'upstreams_status': {
+                'deepseek': {'available': True},
+                'codex': {'available': codex_up(), 'managed': True},
+                'gemini': {'available': antigravity_up(conf), 'managed': True},
+            },
+            'last_up': _UP['last'], 'last_model': _UP['last_model']}
 
 
 # ---------- HTTP ----------
@@ -727,14 +940,11 @@ class Relay(BaseHTTPRequestHandler):
             self.server.conf = conf
         except Exception:
             conf = self.server.conf
-        # /v1/models 探测: 聚合双上游模型列表(供 CC 识别)
+        # /v1/models 探测: 聚合三上游模型列表(供 CC 识别)
         if self.path.split("?")[0] == "/v1/models" and method == "GET":
-            names = []
-            for n, u in (conf.get("upstreams") or {}).items():
-                pass
-            names = (["deepseek-flash", "deepseek-v4-pro",
-                      "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.5",
-                      "claude-opus-5", "claude-sonnet-5"])
+            lm = live_models(conf)
+            names = sorted(set(lm['ds'] + lm['cx'] + lm['gm'] +
+                               ["claude-opus-5", "claude-sonnet-5"]))
             body = json.dumps({"data": [{"id": m, "object": "model", "owned_by": "relay"} for m in names],
                                "object": "list"}).encode()
             self.send_response(200)
@@ -757,12 +967,23 @@ class Relay(BaseHTTPRequestHandler):
 
         up_name, map_model, reason = pick_route(conf, method, path, self.headers, body_json, raw)
 
-        # 若路由到 codex, 确保代理已起
+        # 若路由到外部 sidecar, 尽量懒启动; 不因启动失败吞掉后续可诊断错误。
         if up_name == "codex" and not codex_up():
             codex_start(conf)
+        elif up_name == "antigravity" and not antigravity_up(conf):
+            antigravity_start(conf)
 
-        up = (conf.get("upstreams") or {}).get(up_name) or {}
-        base = up.get("base")
+        up = _upstream_conf(conf, up_name)
+        base = (up.get("base") or "").strip()
+        if not base:
+            msg = json.dumps({"error": {"type": "relay_error", "message": "upstream is not configured: " + up_name}}).encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(msg)
+            return
         upstream = base.rstrip("/") + path
 
         # model 改写
@@ -780,7 +1001,9 @@ class Relay(BaseHTTPRequestHandler):
         te = router_cfg.get("tier_efforts") or {}
         if tier_hit:
             effort = (te.get(tier_hit) or effort)
-        if effort in REASONING_MAP and isinstance(body_json, dict):
+        # Gemini/Antigravity 的 thinking 语义由其兼容层决定，先保留客户端原值，
+        # 不把 Codex 专用 budget_tokens 直接覆盖进去。
+        if effort in REASONING_MAP and up_name != "antigravity" and isinstance(body_json, dict):
             body_json = dict(body_json)
             body_json["thinking"] = REASONING_MAP[effort]
             raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
@@ -790,11 +1013,14 @@ class Relay(BaseHTTPRequestHandler):
             _PROMPT_MGR.capture(tier_hit, body_json)
 
         # 2. 若当前档位开启了在线自定义提示词，用前端配置的内容替换 (并保留 prompt-cache)
+        #    仅当该档三态显式选为 custom 才替换; 其余(含未配置, 默认原版)不替换
         custom_prompt_applied = False
         if tier_hit and isinstance(body_json, dict):
-            body_json, custom_prompt_applied = _PROMPT_MGR.apply_custom(tier_hit, body_json)
-            if custom_prompt_applied:
-                raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+            _tm = str((router_cfg.get("tier_modifier") or {}).get(tier_hit) or "").strip().lower()
+            if _tm == "custom":
+                body_json, custom_prompt_applied = _PROMPT_MGR.apply_custom(tier_hit, body_json)
+                if custom_prompt_applied:
+                    raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
         # 请求头基础过滤与鉴权注入
         fwd = {}
@@ -809,9 +1035,25 @@ class Relay(BaseHTTPRequestHandler):
             fwd["authorization"] = "Bearer " + key
         fwd["Accept-Encoding"] = "identity"
 
-        # 请求修改与指纹处理 (支持 custom / builtin / original 三种模式)
+        # 请求修改与指纹处理: 每档右上角三选框(原版/内置清理/自定义提示词)优先;
+        # 未显式配置的档位 / 非 hybrid 请求回退到全局 modifier_mode
         mod_mode = (router_cfg.get("modifier_mode") or conf.get("modifier_mode") or "custom").strip().lower()
         tier_strip_on = bool(tier_hit and _strip_flags(router_cfg).get(tier_hit, False))
+        tier_mod_map = router_cfg.get("tier_modifier") or {}
+        eff_mode = mod_mode
+        per_tier_explicit = False
+        if tier_hit:
+            _tm = str(tier_mod_map.get(tier_hit) or "") if isinstance(tier_mod_map, dict) else ""
+            _tm = _tm.strip().lower()
+            if _tm in ("original", "builtin", "custom"):
+                eff_mode = _tm
+            else:
+                eff_mode = "original"   # 该档未显式配置 -> 默认原版纯透传
+            per_tier_explicit = True
+        elif up_name == "antigravity":
+            _gm = str(router_cfg.get("gemini_modifier") or "").strip().lower()
+            eff_mode = _gm if _gm in ("original", "builtin") else "original"
+            per_tier_explicit = True
         stripped_n = 0
 
         # 构建上下文供修改器使用
@@ -824,55 +1066,60 @@ class Relay(BaseHTTPRequestHandler):
             "method": method,
             "is_subagent": _is_subagent(self.headers, body_json),
             "tier_strip_on": tier_strip_on,
-            "modifier_mode": mod_mode,
+            "modifier_mode": eff_mode,
         }
 
-        if mod_mode == "original":
-            # 【原版模式】: 不对 body 和 headers 进行任何修改或指纹过滤
+        if eff_mode == "original":
+            # 【原版纯透传】: 不对 body 和 headers 做任何修改或指纹过滤
             stripped_n = 0
-        elif mod_mode == "builtin":
-            # 【内置清理模式】: 原作者的 _strip_cc_fingerprint 逻辑
-            if tier_strip_on and isinstance(body_json, dict):
+        elif eff_mode == "builtin":
+            # 【内置清理】: 删除 CC 身份句 + billing 指纹块
+            if isinstance(body_json, dict):
                 body_json, stripped_n = _strip_cc_fingerprint(body_json)
                 if stripped_n:
                     raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
         else:
-            # 【自定义模式】(默认): 从 custom_modifier.py 热重载执行
-            mod = _MOD_MGR.get_modifier()
-            if mod:
-                # 1. 执行自定义请求体修改
-                try:
-                    if hasattr(mod, "modify_body"):
-                        nb_json, nb_raw, sn = mod.modify_body(body_json, raw, mod_ctx)
-                        if nb_raw is not None:
-                            raw = nb_raw
-                            if nb_json is not None:
+            # 【自定义】
+            if per_tier_explicit:
+                # 每档自定义提示词: system 已在上面 apply_custom 替换, 不再跑全局 python 脚本
+                stripped_n = 0
+            else:
+                # 老全局 custom: 从 custom_modifier.py 热重载执行
+                mod = _MOD_MGR.get_modifier()
+                if mod:
+                    # 1. 执行自定义请求体修改
+                    try:
+                        if hasattr(mod, "modify_body"):
+                            nb_json, nb_raw, sn = mod.modify_body(body_json, raw, mod_ctx)
+                            if nb_raw is not None:
+                                raw = nb_raw
+                                if nb_json is not None:
+                                    body_json = nb_json
+                            elif nb_json is not None:
                                 body_json = nb_json
-                        elif nb_json is not None:
-                            body_json = nb_json
-                            raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
-                        stripped_n = int(sn or 0)
-                except Exception as e:
-                    print(f"[WARN] custom_modifier.modify_body 执行失败: {e}", file=sys.stderr)
+                                raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+                            stripped_n = int(sn or 0)
+                    except Exception as e:
+                        print(f"[WARN] custom_modifier.modify_body 执行失败: {e}", file=sys.stderr)
+                        if tier_strip_on and isinstance(body_json, dict):
+                            body_json, stripped_n = _strip_cc_fingerprint(body_json)
+                            if stripped_n:
+                                raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
+                    # 2. 执行自定义请求头修改
+                    try:
+                        if hasattr(mod, "modify_headers"):
+                            new_fwd = mod.modify_headers(fwd, mod_ctx)
+                            if isinstance(new_fwd, dict):
+                                fwd = new_fwd
+                    except Exception as e:
+                        print(f"[WARN] custom_modifier.modify_headers 执行失败: {e}", file=sys.stderr)
+                else:
+                    # 若无自定义文件或加载失败，安全回退到内置规则
                     if tier_strip_on and isinstance(body_json, dict):
                         body_json, stripped_n = _strip_cc_fingerprint(body_json)
                         if stripped_n:
                             raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
-
-                # 2. 执行自定义请求头修改
-                try:
-                    if hasattr(mod, "modify_headers"):
-                        new_fwd = mod.modify_headers(fwd, mod_ctx)
-                        if isinstance(new_fwd, dict):
-                            fwd = new_fwd
-                except Exception as e:
-                    print(f"[WARN] custom_modifier.modify_headers 执行失败: {e}", file=sys.stderr)
-            else:
-                # 若无自定义文件或加载失败，安全回退到内置规则
-                if tier_strip_on and isinstance(body_json, dict):
-                    body_json, stripped_n = _strip_cc_fingerprint(body_json)
-                    if stripped_n:
-                        raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
         data = raw if raw else None
 
@@ -994,8 +1241,18 @@ class UIHandler(BaseHTTPRequestHandler):
         return {"error": "not found"}
 
     def do_GET(self):
-        if self.path.startswith("/api/status"):
+        if self.path.startswith("/api/config"):
+            try:
+                self._json(_config_public_view(load_conf()))
+            except Exception as e:
+                self._json({"error": "unable to read config: " + str(e)}, 500)
+        elif self.path.startswith("/api/status"):
             self._json(stats_snapshot())
+        elif self.path.startswith("/api/probe"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            name = (q.get("name") or ["antigravity"])[0]
+            self._json(probe_upstream(load_conf(), name))
         elif self.path.startswith("/api/prompts"):
             self._json(_PROMPT_MGR.get_data())
         elif self.path.startswith("/api/calls"):
@@ -1023,9 +1280,21 @@ class UIHandler(BaseHTTPRequestHandler):
         except Exception:
             data = {}
         p = self.path.split("?")[0]
-        if p == "/api/route":
-            route = data.get("route")
-            if route not in ("hybrid", "codex", "deepseek"):
+        if p == "/api/config":
+            try:
+                with CONF_LOCK:
+                    conf = load_conf()
+                    view = _apply_config_update(conf, data)
+                self._json({"ok": True, "config": view})
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+            except Exception as e:
+                self._json({"error": "unable to save config: " + str(e)}, 500)
+        elif p == "/api/route":
+            route = str(data.get("route") or "").strip().lower()
+            if route == "gemini":
+                route = "antigravity"
+            if route not in ("hybrid", "codex", "deepseek", "antigravity"):
                 self._json({"error": "bad route"}, 400); return
             with CONF_LOCK:                      # 读-改-写整体串行, 免五档连点丢更新
                 conf = load_conf()
@@ -1054,6 +1323,28 @@ class UIHandler(BaseHTTPRequestHandler):
                     m = str(data["modifier_mode"]).strip().lower()
                     if m in ("custom", "builtin", "original"):
                         rt["modifier_mode"] = m
+                # 每档三态修改器 (UI 每档右上角三选框): original/builtin/custom, 按档合并更新
+                # 选 custom 即启用该档自定义提示词; 选 original/builtin 则关闭该档自定义提示词
+                if "tier_modifier" in data:
+                    payload = data["tier_modifier"]
+                    if not isinstance(payload, dict):
+                        self._json({"error": "tier_modifier must be object"}, 400); return
+                    cur = dict(rt.get("tier_modifier") or {})
+                    for k in TIER_KEYS:
+                        if k not in payload:
+                            continue
+                        v = str(payload[k]).strip().lower()
+                        if v not in ("original", "builtin", "custom"):
+                            self._json({"error": "tier_modifier.%s must be original|builtin|custom" % k}, 400)
+                            return
+                        cur[k] = v
+                        _PROMPT_MGR.update_tier(k, enabled=(v == "custom"))
+                    rt["tier_modifier"] = cur
+                # Gemini(Antigravity) 全量二选: original | builtin (不支持替换协议头/自定义提示词)
+                if "gemini_modifier" in data:
+                    g = str(data["gemini_modifier"]).strip().lower()
+                    if g in ("original", "builtin"):
+                        rt["gemini_modifier"] = g
                 # 推理强度 effort 为全局设置, 任何路由下都可修改 (档位见 EFFORT_VALUES)
                 if data.get("effort") is not None:
                     v = str(data.get("effort") or "").strip()
@@ -1074,13 +1365,17 @@ class UIHandler(BaseHTTPRequestHandler):
                     else:
                         rt.pop("tier_efforts", None)
                 if route == "hybrid":
-                    # hybrid 五档: tiers.main/opus/sonnet/fast/agent (各自模型, 上游随模型名决定)
+                    # hybrid 五档: tiers.main/opus/sonnet/fast/agent (各自模型, 上游随模型归属决定)
                     if data.get("tiers") is not None:
                         t = data.get("tiers") or {}
                         cur = dict(rt.get("tiers") or {})
                         for k in ("main", "opus", "sonnet", "fast", "agent"):
                             v = str((t or {}).get(k) or "").strip()
                             if v:
+                                p = provider_for_model(v, conf)
+                                if p is None and not (v.startswith(("gpt-", "deepseek-", "gemini-"))):
+                                    self._json({"error": "unknown model for tier %s: %s" % (k, v)}, 400)
+                                    return
                                 cur[k] = v
                         if cur:
                             rt["tiers"] = cur
@@ -1095,9 +1390,17 @@ class UIHandler(BaseHTTPRequestHandler):
                         v = str(data.get("deepseek_model") or "").strip()
                         if v: rt["hybrid_deepseek_model"] = v
                         else: rt.pop("hybrid_deepseek_model", None)
+                    if data.get("gemini_model") is not None or data.get("antigravity_model") is not None:
+                        v = str(data.get("gemini_model", data.get("antigravity_model")) or "").strip()
+                        if v: rt["hybrid_antigravity_model"] = v
+                        else: rt.pop("hybrid_antigravity_model", None)
                     rt.pop("model", None)
                 else:
                     m = (data.get("model") or "").strip()
+                    if route == "codex" and m and provider_for_model(m, conf) != "codex":
+                        self._json({"error": "codex route requires a gpt model"}, 400); return
+                    if route == "antigravity" and m and provider_for_model(m, conf) != "antigravity":
+                        self._json({"error": "Gemini route requires a gemini model"}, 400); return
                     if not m:
                         rt.pop("model", None)
                     else:
@@ -1109,6 +1412,18 @@ class UIHandler(BaseHTTPRequestHandler):
             if act == "start": self._json({"result": codex_start(load_conf())})
             elif act == "stop": self._json({"result": codex_stop()})
             else: self._json({"error": "bad action"}, 400)
+        elif p == "/api/upstream":
+            name = str(data.get("name") or "").strip().lower()
+            act = str(data.get("action") or "").strip().lower()
+            conf = load_conf()
+            if name in ("gemini", "antigravity") and act == "start":
+                self._json({"result": antigravity_start(conf), "probe": probe_upstream(conf, "antigravity")})
+            elif name == "codex" and act == "start":
+                self._json({"result": codex_start(conf)})
+            elif name == "codex" and act == "stop":
+                self._json({"result": codex_stop()})
+            else:
+                self._json({"error": "unsupported upstream action"}, 400)
         elif p == "/api/reset":
             try:
                 open(RECORDS, "w").close()

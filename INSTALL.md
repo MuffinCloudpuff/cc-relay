@@ -83,6 +83,16 @@ curl http://127.0.0.1:8317/v1/models -H "Authorization: Bearer my-local-key-0001
 返回模型列表就说明通了。停止用 `stop_proxy.bat`。
 （后面 cc-relay 也能帮你起停这个上游：UI 上的「启动代理/停止代理」，或 `python cc_relay.py startproxy`。懒加载：hybrid 下第一个走 Codex 的请求会把它拉起来。）
 
+### 3.5 Gemini / Antigravity（可选）
+
+Gemini 使用本机 Antigravity Tools 的 Anthropic-compatible 接口。确认工具监听 `127.0.0.1:8045` 后先做只读检查：
+
+```bat
+curl http://127.0.0.1:8045/v1/models -H "Authorization: Bearer <你的本地访问 key>"
+```
+
+在 `config.json` 中填写 `antigravity_key` 和可选的 `antigravity_exe`。`upstreams.antigravity.base` 必须是 `http://127.0.0.1:8045`，不要写成带 `/v1` 的地址，否则 relay 拼接 `/v1/messages` 时会得到 `/v1/v1/messages`。UI 的“Gemini 全量”以及 hybrid 档位会从该端点发现 `gemini-*` 文本模型。若接口只支持 Gemini 原生 `generateContent` 而不是 `/v1/messages`，请先不要启用路由，当前 relay 不会擅自转换协议。
+
 ---
 
 ## 4. 写中转配置 config.json
@@ -103,9 +113,11 @@ copy config.example.json config.json
 | `codex_proxy_key` | 与 `codex-proxy/config.yaml` 的 `api-keys` **完全一致** |
 | `codex_exe` | `cli-proxy-api.exe` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\cli-proxy-api.exe` |
 | `codex_config` | `config.yaml` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\config.yaml` |
+| `antigravity_key` | Antigravity 本地兼容接口的访问 key，不是 Claude Code 假 key |
+| `antigravity_exe` | Antigravity Tools 可执行文件路径；仅在 `tools.antigravity.auto_start` 开启时用于懒启动 |
 | `record_dir` | 预留字段，当前版本未使用（记录固定写到项目目录的 `records.jsonl`） |
 | `max_body_capture` | 单条记录最多抓多少字节请求体，默认 2000000 |
-| `upstreams.*` | 上游地址。DeepSeek 用 `/anthropic` 结尾的兼容端点；Codex 指向 `http://127.0.0.1:8317` |
+| `upstreams.*` | 上游地址。DeepSeek 用 `/anthropic` 结尾的兼容端点；Codex 指向 `http://127.0.0.1:8317`；Gemini/Antigravity 指向 `http://127.0.0.1:8045`（不要附加 `/v1`） |
 | `router` | 路由与档位，见 [第 7 节](#7-混合模式怎么配) |
 
 > 只想用 DeepSeek：把 `router.route` 改成 `"deepseek"`，`codex_exe` / `codex_config` / `codex_proxy_key` 可以留空。
