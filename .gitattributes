@@ -1,5 +1,24 @@
-* text=auto eol=lf
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python, JSON, Markdown, HTML, YAML use LF
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+
+# Windows Batch / CMD scripts must use CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# Binary files
 *.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
 *.exe binary
+*.dll binary

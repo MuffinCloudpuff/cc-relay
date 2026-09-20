@@ -17,8 +17,8 @@ PYW = os.environ.get("CC_RELAY_PYTHONW") or sys.executable.replace("python.exe",
 PS = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 CODEX_PORT = 8317
 ANTIGRAVITY_PORT = int(os.environ.get("CC_RELAY_ANTIGRAVITY_PORT", "8045"))
-RELAY_PORT = 8400
-UI_PORT = 8610
+RELAY_DEFAULT_PORT = 8400
+UI_DEFAULT_PORT = 8610
 WATCH_PID = os.path.join(BASE, ".watch.pid")
 
 
@@ -29,16 +29,26 @@ def tcp(port, host="127.0.0.1", t=0.6):
         return False
 
 
-def relay_up():
-    return tcp(RELAY_PORT)
-
-
 def _load_conf():
     try:
         with open(CONF, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
+
+
+def relay_port(conf=None):
+    conf = conf or _load_conf()
+    return int(conf.get("listen_port") or RELAY_DEFAULT_PORT)
+
+
+def ui_port(conf=None):
+    conf = conf or _load_conf()
+    return int(conf.get("ui_port") or UI_DEFAULT_PORT)
+
+
+def relay_up(conf=None):
+    return tcp(relay_port(conf))
 
 
 def antigravity_port(conf=None):
@@ -126,28 +136,34 @@ def _pids_on_ports(ports):
 
 def relay_start():
     """启动 cc-relay (含 UI); 返回 True=刚启动"""
-    if relay_up():
+    conf = _load_conf()
+    rp = relay_port(conf)
+    up = ui_port(conf)
+    if relay_up(conf):
         return False
     # 按端口 + 命令行双重清掉僵尸实例
-    for pid in _pids_on_ports([RELAY_PORT, UI_PORT]):
+    for pid in _pids_on_ports([rp, up]):
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     for pid in _pythonw_pids_like("cc_relay"):
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     time.sleep(1.2)
-    if tcp(RELAY_PORT):
+    if tcp(rp):
         return False  # 端口仍被占, 让现有的用
     subprocess.Popen([PYW, RELAY, "serve"], cwd=BASE, creationflags=subprocess.CREATE_NO_WINDOW)
     for _ in range(30):
         time.sleep(0.4)
-        if relay_up():
+        if relay_up(conf):
             return True
     return False
 
 
 def relay_stop():
-    for pid in _pids_on_ports([RELAY_PORT, UI_PORT]) | set(_pythonw_pids_like("cc_relay")):
+    conf = _load_conf()
+    rp = relay_port(conf)
+    up = ui_port(conf)
+    for pid in _pids_on_ports([rp, up]) | set(_pythonw_pids_like("cc_relay")):
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
                        creationflags=subprocess.CREATE_NO_WINDOW)
     return True
@@ -239,7 +255,7 @@ def cmd_stopall():
 
 def cmd_status():
     conf = _load_conf()
-    print(json.dumps({"relay_up": relay_up(), "ui_up": tcp(UI_PORT),
+    print(json.dumps({"relay_up": relay_up(conf), "ui_up": tcp(ui_port(conf)),
                       "codex_up": tcp(CODEX_PORT), "antigravity_up": antigravity_up(conf),
                       "gemini_up": antigravity_up(conf), "claude_procs": claude_count()}, ensure_ascii=False))
 

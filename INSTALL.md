@@ -1,352 +1,142 @@
-# 安装说明（Windows）
+# cc-relay 部署与实战安装手册
 
-面向第一次部署 cc-relay 的用户。装完的效果：**终端敲 `claude` → 中转和 UI 自动拉起 → CC 正常对话 → 最后一个 CC 退出后中转自动关闭**。
-
-> 下面以项目放在 `C:\cc-relay` 为例。路径可以换，但 `config.json` 里出现的路径要跟着换。
-> 找不到命令对应关系时，先看 [第 8 节 故障排查](#8-故障排查)。
+本手册提供 `cc-relay` 从零开始的完整安装、跨平台配置、三大上游接入、Claude Code 注入以及常见故障排查指引。
 
 ---
 
-## 1. 前置条件
+## 📋 目录
 
-| 项 | 要求 | 备注 |
-|---|---|---|
-| 系统 | Windows 10 / 11 | 中转本体逻辑跨平台，但隐藏窗口/进程管理是为 Windows 写的 |
-| Python | 3.8+ | 安装时勾选 **Add Python to PATH**；需要 `python.exe` 和 `pythonw.exe` 都在 PATH |
-| Claude Code | 已能单独运行 | `npm i -g @anthropic-ai/claude-code`，装完 `claude --version` 有输出 |
-| 网络 | 能直连 `api.deepseek.com` | DeepSeek 直连，不需要代理 |
-| 代理（可选） | 本机 HTTP 代理 | 只有要接 **Codex/GPT** 才需要，例如 Clash 的 `127.0.0.1:7897` |
-| ChatGPT 账号（可选） | 有 Codex 额度 | 同上，用 OAuth 登录，不消耗 API key |
-| Antigravity Tools（可选） | 工具在本机监听 `127.0.0.1:8045` | 只有要接 **Gemini** 才需要，见第 3.5 节 |
-
-**只想用 DeepSeek**：跳过第 3 节，`config.json` 里把 `route` 设成 `"deepseek"` 即可，不需要 CLIProxyAPI。
-
----
-
-## 2. 获取项目
-
-```bat
-git clone https://github.com/xsneser/cc-relay.git C:\cc-relay
-```
-
-或者下载 ZIP 解压到 `C:\cc-relay`。目录里应该有 `cc_relay.py`、`lifecycle.py`、`ui.html`、`config.example.json`。
+1. [前置环境要求](#1-前置环境要求)
+2. [获取源码与初始配置](#2-获取源码与初始配置)
+3. [三大上游对接实操](#3-三大上游对接实操)
+   - [3.1 DeepSeek 上游直连](#31-deepseek-上游直连)
+   - [3.2 Codex (CLIProxyAPI) 桥接](#32-codex-cliproxyapi-桥接)
+   - [3.3 Gemini (Antigravity Tools) 桥接](#33-gemini-antigravity-tools-桥接)
+4. [Claude Code 配置注入](#4-claude-code-配置注入)
+5. [Windows 无感自动化体验 (Wrapper & Lifecycle)](#5-windows-无感自动化体验-wrapper--lifecycle)
+6. [macOS / Linux 守护与服务化](#6-macos--linux-守护与服务化)
+7. [日常运维与诊断命令](#7-日常运维与诊断命令)
+8. [常见故障排查 FAQ](#8-常见故障排查-faq)
 
 ---
 
-## 3. 配置 Codex 上游（可选）
+## 1. 前置环境要求
 
-> 跳过本节 = 只能用 DeepSeek。要用 GPT 系模型必须做这一节。
-
-### 3.1 放好 CLIProxyAPI
-
-1. 到 [CLIProxyAPI Releases](https://github.com/router-for-me/CLIProxyAPI/releases) 下载 Windows 版（`cli-proxy-api.exe`）
-2. 放到 `C:\cc-relay\codex-proxy\cli-proxy-api.exe`
-
-### 3.2 写 codex-proxy 配置
-
-```bat
-cd /d C:\cc-relay\codex-proxy
-copy config.example.yaml config.yaml
-```
-
-编辑 `config.yaml`，至少改这几处：
-
-```yaml
-port: 8317
-
-auth-dir: "~/.cli-proxy-api"        # OAuth 凭证落盘位置，保持默认即可
-
-api-keys:
-  - "my-local-key-0001"             # 本地调用 key，随便设；要和 config.json 的 codex_proxy_key 一致
-
-proxy-url: "http://127.0.0.1:7897"  # 你的代理端口；没有代理就留空 ""
-```
-
-> 端口 8317 是 cc-relay 写死的 Codex 上游端口，别改（要改得同时改 `cc_relay.py`）。
-
-### 3.3 登录 Codex 账号
-
-```bat
-cd /d C:\cc-relay\codex-proxy
-cli-proxy-api.exe -codex-login
-```
-
-会弹浏览器走 OAuth 授权；成功后凭证写入 `C:\Users\<你>\.cli-proxy-api\`（**别提交、别外传**）。
-无图形环境改用设备码流程：`cli-proxy-api.exe -codex-device-login`。
-
-### 3.4 启动并自检
-
-```bat
-start_proxy.bat                     :: 隐藏窗口启动
-curl http://127.0.0.1:8317/v1/models -H "Authorization: Bearer my-local-key-0001"
-```
-
-返回模型列表就说明通了。停止用 `stop_proxy.bat`。
-（后面 cc-relay 也能帮你起停这个上游：UI 上的「启动代理/停止代理」，或 `python cc_relay.py startproxy`。懒加载：hybrid 下第一个走 Codex 的请求会把它拉起来。）
-
-### 3.5 Gemini / Antigravity（可选）
-
-Gemini 使用本机 Antigravity Tools 的 Anthropic-compatible 接口。确认工具监听 `127.0.0.1:8045` 后先做只读检查：
-
-```bat
-curl http://127.0.0.1:8045/v1/models -H "Authorization: Bearer <你的本地访问 key>"
-```
-
-在 `config.json` 中填写 `antigravity_key` 和可选的 `antigravity_exe`。`upstreams.antigravity.base` 必须是 `http://127.0.0.1:8045`，不要写成带 `/v1` 的地址，否则 relay 拼接 `/v1/messages` 时会得到 `/v1/v1/messages`。UI 的“Gemini 全量”以及 hybrid 档位会从该端点发现 `gemini-*` 文本模型。若接口只支持 Gemini 原生 `generateContent` 而不是 `/v1/messages`，请先不要启用路由，当前 relay 不会擅自转换协议。
+- **Python 3.8 或更高版本**（必须已加入系统 PATH）
+  - 验证命令：`python --version` 或 `python3 --version`
+  - *注：cc-relay 采用纯标准库构建，无需安装任何 pip 扩展包。*
+- **Claude Code CLI**（官方已正常安装可用）
+  - 验证命令：`claude --version`
+- **Git**
+  - 验证命令：`git --version`
 
 ---
 
-## 4. 写中转配置 config.json
+## 2. 获取源码与初始配置
 
-```bat
-cd /d C:\cc-relay
+### 2.1 克隆仓库
+
+```bash
+# 克隆仓库至本地
+git clone https://github.com/xsneser/cc-relay.git
+cd cc-relay
+```
+
+### 2.2 生成本地配置文件
+
+```bash
+# Windows (CMD / PowerShell)
 copy config.example.json config.json
+
+# macOS / Linux
+cp config.example.json config.json
 ```
 
-字段含义：
-
-| 字段 | 说明 |
-|---|---|
-| `listen_host` / `listen_port` | 中转监听地址，默认 `127.0.0.1:8400`。给 CC 用，别对外暴露 |
-| `ui_port` | UI 端口，默认 `8610` |
-| `fake_api_key` | **发给 Claude Code 的假 key**，自己随便定（如 `sk-relay-local-0000`），要和第 6 节的环境变量一致 |
-| `real_deepseek_key` | 你的 DeepSeek 官方 API Key（`sk-` 开头） |
-| `codex_proxy_key` | 与 `codex-proxy/config.yaml` 的 `api-keys` **完全一致** |
-| `codex_exe` | `cli-proxy-api.exe` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\cli-proxy-api.exe` |
-| `codex_config` | `config.yaml` 的**绝对路径**，如 `C:\\cc-relay\\codex-proxy\\config.yaml` |
-| `antigravity_key` | Antigravity 本地兼容接口的访问 key，不是 Claude Code 假 key |
-| `antigravity_exe` | Antigravity Tools 可执行文件路径；仅在 `tools.antigravity.auto_start` 开启时用于懒启动（该项由 `lifecycle.py` 读取，默认 `true`） |
-| `record_dir` | 预留字段，当前版本未使用（记录固定写到项目目录的 `records.jsonl`） |
-| `max_body_capture` | 单条记录最多抓多少字节请求体，默认 2000000 |
-| `upstreams.*` | 上游地址。DeepSeek 用 `/anthropic` 结尾的兼容端点；Codex 指向 `http://127.0.0.1:8317`；Gemini/Antigravity 指向 `http://127.0.0.1:8045`（不要附加 `/v1`） |
-| `router` | 路由与档位，见 [第 7 节](#7-混合模式怎么配) |
-| `router.hybrid_codex_model` / `hybrid_deepseek_model` / `hybrid_antigravity_model` | hybrid 下三个上游各自的**兜底目标模型**（档位没配时用它）；`hybrid_antigravity_model` 同时参与「要不要拉起 Gemini 上游」的判断 |
-| `router.modifier_mode` | 全局请求改写模式：`original` / `builtin` / `custom`。只对**没有命中任何档位**的请求生效 |
-| `router.tier_modifier` | 五档各自的改写模式（`main` / `opus` / `sonnet` / `fast` / `agent`）；命中该档时优先于全局，**没配的档按原版透传** |
-| `router.gemini_modifier` | 非 hybrid（全部走 Gemini 上游）时的改写模式：`original` / `builtin`，默认 `builtin` |
-
-> 只想用 DeepSeek：把 `router.route` 改成 `"deepseek"`，`codex_exe` / `codex_config` / `codex_proxy_key` 可以留空。
-> ⚠️ JSON 里 Windows 路径要写成双反斜杠 `C:\\cc-relay\\...`，或改成正斜杠 `C:/cc-relay/...`。
+> ⚠️ **安全警告**：`config.json` 包含你的真实上游 API Key，严禁上传或提交至公开代码仓库！项目自带的 `.gitignore` 已默认忽略该文件。
 
 ---
 
-## 5. 让 `claude` 自启动（wrapper）
+## 3. 三大上游对接实操
 
-原理：在 PATH 里放一个**同名 `claude.cmd`**，排在真正的 CLI（`%APPDATA%\npm\claude.cmd`）**前面**。敲 `claude` 时先命中 wrapper，它负责拉起中转、开 UI、起看门狗，最后再调用真正的 CLI。
+### 3.1 DeepSeek 上游直连
 
-### 5.1 放 wrapper
-
-仓库里自带模板：**`wrapper\claude.cmd`**（ASCII + CRLF，已写好）。
-
-**最省事的做法（零改动）**：不复制、不改文件，直接把项目里的 `wrapper` 目录加到 PATH 最前面 —— wrapper 用 `%~dp0..` 自动定位到项目根目录。
-
-```bat
-:: 例：项目在 C:\cc-relay，就把 C:\cc-relay\wrapper 排到 PATH 最前
-```
-
-**或者**把 `wrapper\claude.cmd` 复制到你自己的 bin 目录（如 `C:\Users\<你>\bin\`），并把文件里的这一行改成实际项目路径：
-
-```bat
-if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=C:\cc-relay"
-```
-
-模板内容（照抄也行，**必须 ASCII 内容 + CRLF 换行**）：
-
-```bat
-@echo off
-rem ============================================================
-rem  claude lifecycle wrapper (cc-relay)
-rem  enter : ensure cc-relay(+UI) running; open UI page
-rem  watch : stop relay + codex when LAST claude exits
-rem  bypass: set CLAUDE_SKIP_AUTO=1
-rem ============================================================
-setlocal
-if "%CLAUDE_SKIP_AUTO%"=="1" goto run
-if "%CC_RELAY_DIR%"=="" set "CC_RELAY_DIR=%~dp0.."
-python "%CC_RELAY_DIR%\lifecycle.py" autostart
-set RC=%errorlevel%
-if %RC%==0 start "" "http://127.0.0.1:8610"
-start "" pythonw "%CC_RELAY_DIR%\lifecycle.py" watch
-:run
-call "%APPDATA%\npm\claude.cmd" %*
-```
-
-- `%~dp0` 是 wrapper 自己所在目录；`%~dp0..` = 它的上一级（模板放在项目的 `wrapper\` 里，正好是项目根）
-- `python` / `pythonw` 需要在 PATH 里；极端情况下可换成绝对路径
-- 想临时绕过整套自动流程：`set CLAUDE_SKIP_AUTO=1` 后再敲 `claude`
-
-### 5.2 让这个目录排在 PATH 前面
-
-图形界面：`Win+R` → `sysdm.cpl` → 高级 → 环境变量 → 用户变量 `Path` → 编辑 → 新建 `C:\Users\<你>\bin` → **上移到最顶** → 确定。
-
-命令行（**直接前置、保留原有 PATH**，别用 `setx`，它超过 1024 字符会截断）：
-
-```powershell
-$d = "$env:USERPROFILE\bin"
-$p = [Environment]::GetEnvironmentVariable('Path','User')
-if ($p -notlike "*$d*") { [Environment]::SetEnvironmentVariable('Path', "$d;$p", 'User') }
-```
-
-验证（**新开一个终端**）：
-
-```bat
-where claude
-```
-
-第一条应该指向 `C:\Users\<你>\bin\claude.cmd`，第二条才是 `%APPDATA%\npm\claude.cmd`。
-
----
-
-## 6. 给 Claude Code 设环境变量
-
-用户级设置（`cmd` 里逐条执行）：
-
-```bat
-setx ANTHROPIC_BASE_URL "http://127.0.0.1:8400"
-setx ANTHROPIC_AUTH_TOKEN "sk-relay-local-0000"
-setx ANTHROPIC_MODEL "relay-main[1m]"
-setx ANTHROPIC_DEFAULT_OPUS_MODEL "OPUS_MODEL[1m]"
-setx ANTHROPIC_DEFAULT_SONNET_MODEL "SONNET_MODEL[1m]"
-setx ANTHROPIC_SMALL_FAST_MODEL "FAST_MODEL[1m]"
-```
-
-要点：
-
-- `ANTHROPIC_AUTH_TOKEN` 必须等于 `config.json` 的 `fake_api_key`（假的，只为过 CC 的校验）。
-- **`OPUS_MODEL` / `SONNET_MODEL` / `FAST_MODEL` 这三个名字必须原样保留**——中转靠名字识别档位。
-- `ANTHROPIC_MODEL`（主模型档）名字随意，认不出来就归主模型档。作者本机用的是中文 `本地中转[1m]`；若遇到中文环境变量编码问题，用 `relay-main[1m]` 这类 ASCII 名即可。
-- `[1m]` 后缀只做两件事：告诉 CC 上下文窗口是 1M（避免「未知模型」告警）+ 让中转知道这是占位名。中转会剥掉 `[...]` 再路由，不是必须，但建议留着。
-- **`setx` 只对新开的终端生效**，设完关掉旧窗口。想恢复默认模型，删掉这几个变量即可。
-
----
-
-## 7. 混合模式怎么配
-
-`config.json` 的 `router` 段：
-
-```jsonc
-"router": {
-  "route": "hybrid",
-  "hybrid_codex_model": "gpt-5.6-sol",     // 高价值兜底模型
-  "hybrid_deepseek_model": "deepseek-flash", // 普通兜底模型
-  "tiers": {
-    "main":   "deepseek-flash",   // 主对话循环
-    "opus":   "gpt-5.6-sol",      // plan / 复杂推理（贵，值得）
-    "sonnet": "deepseek-flash",   // 子代理档
-    "fast":   "deepseek-flash",   // 后台小调用
-    "agent":  "deepseek-flash"    // 子代理（Claude Agent SDK / plan 代理）
-  },
-  "tier_efforts": {               // 可选：每档单独设推理强度
-    "main": "medium", "opus": "medium",
-    "sonnet": "instant", "fast": "instant", "agent": "medium"
-  },
-  "effort": "medium",             // 全局兜底强度（档位没配时用这个）
-  "strip_cc_banner": {            // 各档指纹清理（见下），与路由档位无关
-    "main": true, "opus": false, "sonnet": false, "fast": true, "agent": false
-  }
-}
-```
-
-**指纹清理（`strip_cc_banner`）**：五档各自一个开关，某档开启后只对命中该档的请求做一次 body 改写——删掉 system 里整块的 CC / Agent SDK 身份句（`You are Claude Code, Anthropic's official CLI for Claude.` 或 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`）和 `x-anthropic-billing-header:` 开头的 billing 指纹块，身份句混在别的文本里则只摘句子；被删块的 `cache_control` 会顺延给其后最近的幸存块（该处已有断点就不动，被删的是尾块则向前落），不会白白丢 prompt-cache 断点。UI 上就是每张档位卡右上角那个小开关，也可以 `curl -d '{"strip_cc_banner":{"main":true}}'` 按档改；传单个 `true`/`false` 等价于只改 `main`（旧的单值配置也会自动迁移为主档 + fast 档）。抓包列表里该请求会显示删了几块。
-
-**请求改写模式（`modifier_mode` / `tier_modifier`）**：每档一个三态选择，决定转发前怎么处理 system：
-
-| 取值 | 行为 |
-|---|---|
-| `original` | **原版纯透传**：不动 body、不改请求头、不做指纹过滤 |
-| `builtin` | **内置清理**：删掉 CC / Agent SDK 身份句与 `x-anthropic-billing-header` 块 |
-| `custom` | **自定义**：用 UI「提示词」页面给该档配置的 system 替换（保留 prompt-cache 断点） |
-
-- 命中档位时（`hybrid:*`）以 `tier_modifier` 为准；**该档没显式配置 = 原版透传**（不会掉进全局 `custom`）
-- 只有没命中档位的请求才回退到全局 `router.modifier_mode`（默认 `custom`，此模式下会热重载执行 `custom_modifier.py` 里的 `modify_body` / `modify_headers`）
-- 全部走 Gemini 上游（非 hybrid）时由 `router.gemini_modifier` 单独控制，默认 `builtin`
-- UI 上就是每张档位卡右上角那个三选框；也可以 `curl -d '{"tier_modifier":{"opus":"builtin"}}'` 只改传进来的档位
-- `strip_cc_banner` 依然有效：`builtin` 模式必定执行内置清理；`custom` 模式下若自定义修改器缺失或抛错，会按该档的 `strip_cc_banner` 开关回退到内置清理
-
-**档位怎么落到 CC 上**：
-
-| 档位 | CC 发出的名字 | 什么时候用 | 经验配法 |
-|---|---|---|---|
-| `main` | `ANTHROPIC_MODEL` | 主对话循环 | 便宜快的模型 |
-| `opus` | `OPUS_MODEL` | plan / 复杂推理 | 唯一值得花贵模型额度的地方 |
-| `sonnet` | `SONNET_MODEL` | CC 内部中等调用 | 便宜模型 |
-| `fast` | `FAST_MODEL` | 后台小调用（起标题等） | 最便宜，`instant` 强度 |
-| `agent` | 任意占位名 + 子代理特征 | 子代理 / Claude Agent SDK | 按钱包决定 |
-
-上游按**模型名**判定，顺序是：`config.json` 里的 `model_routes` 显式指定 → 内置模型表 → 前缀回退（`gpt-*` → Codex、`deepseek-*` → DeepSeek、`gemini-*` → Gemini/Antigravity）。**认不出来的模型不会被静默塞给 DeepSeek**。所以任意档位都能填任一上游的模型，混搭是允许的。
-
-**推理强度**取值 `off` / `on` / `instant` / `low` / `medium` / `high` / `xhigh` / `max`，会注入到请求体的 `thinking` 参数（`instant`=512、`low`=2048、`medium`=8192、`high`=16384、`xhigh`=32768、`max`=65536 tokens）。
-
-**三种改法，都不需要重启 CC 或中转**（中转每个请求重读配置）：
-
-1. **UI（推荐）**：打开 <http://127.0.0.1:8610> → 点卡片切模式 / 下拉改档位模型 → 下一个请求即生效
-2. **命令行**：
-   ```bat
-   curl -X POST http://127.0.0.1:8610/api/route -H "Content-Type: application/json" -d "{\"route\":\"hybrid\",\"tiers\":{\"opus\":\"gpt-5.6-sol\"}}"
+1. 前往 [DeepSeek 开放平台](https://platform.deepseek.com/) 获取 API Key。
+2. 打开 `config.json`，填写 `real_deepseek_key`：
+   ```json
+   {
+     "real_deepseek_key": "sk-your-actual-deepseek-api-key"
+   }
    ```
-3. **直接编辑 `config.json`** → 保存即可
-
-**常见配方**：
-
-| 目标 | 怎么配 |
-|---|---|
-| 省钱（默认） | 只有 `opus` 用 `gpt-5.6-sol`，其余全 `deepseek-flash` |
-| plan 代理也吃好模型 | `agent` 改成 `gpt-5.6-sol` |
-| 全 DeepSeek | `route` 改成 `"deepseek"`（`model` 可指定具体模型） |
-| 全 Codex | `route` 改成 `"codex"`，`model` 填 `gpt-5.6-sol` |
-| 临时对比效果 | UI 上直接切卡片，看完再切回来，历史都在抓包查看器里 |
+3. 默认配置下，DeepSeek 上游端点为 `https://api.deepseek.com/anthropic`，网络直连即可使用。
 
 ---
 
-## 8. 验证与日常使用
+### 3.2 Codex (CLIProxyAPI) 桥接
 
-**首次验证**：
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 可以将 OpenAI Codex / GPT 系列模型转换为 Anthropic Messages 兼容格式。
 
-```bat
-cd /d C:\cc-relay
-python lifecycle.py status
-```
-
-期望输出里 `relay_up: true`、`ui_up: true`（`codex_up` 只在要用 Codex 时关注）。
-
-然后**新开一个终端**敲：
-
-```bat
-claude
-```
-
-应该看到：UI 浏览器页自动打开 → CC 正常进入对话。随便问一句，回到 UI 的「🔍 抓包查看器」应能看到这条请求和它命中的规则（如 `hybrid:main`）。
-
-**日常**：
-
-| 操作 | 命令 |
-|---|---|
-| 敲 `claude` | 自动拉起中转 + UI，退出后自动停 |
-| 关掉浏览器页 | 不影响中转 |
-| 临时不走中转 | `set CLAUDE_SKIP_AUTO=1` 后敲 `claude` |
-| 手动全停 | `python lifecycle.py stopall` |
-| 看状态 | `python lifecycle.py status` |
-| 看抓包统计 | `python cc_relay.py stats` / `last 20` / `dump 5` |
-| 只想起中转不起 UI | `python cc_relay.py serve --no-ui` |
+1. **下载与放置**：
+   - 从 CLIProxyAPI 官方 Release 页面下载对应系统的二进制文件。
+   - Windows 用户将 `cli-proxy-api.exe` 放入本项目的 `codex-proxy/` 目录下。
+2. **生成与配置 `config.yaml`**：
+   - 复制模板：
+     ```bash
+     cd codex-proxy
+     copy config.example.yaml config.yaml
+     ```
+   - 编辑 `codex-proxy/config.yaml`，按需配置监听端口（默认 `8317`）与代理。
+3. **完成 OAuth / Token 登录**：
+   - 运行 `start_proxy.bat` 或手动执行 `cli-proxy-api.exe` 完成账号授权。
+   - 验证服务正常响应：访问 `http://127.0.0.1:8317/v1/models`。
+4. **绑定至 `config.json`**：
+   ```json
+   {
+     "codex_proxy_key": "your-proxy-key",
+     "codex_exe": "C:\\path\\to\\cc-relay\\codex-proxy\\cli-proxy-api.exe",
+     "codex_config": "C:\\path\\to\\cc-relay\\codex-proxy\\config.yaml"
+   }
+   ```
+   *配置 `codex_exe` 路径后，当路由命中 Codex 且代理未启动时，cc-relay 会自动在后台静默拉起该进程。*
 
 ---
 
-## 9. 在桌面图形客户端（Claude Desktop / GUI）中使用
+### 3.3 Gemini (Antigravity Tools) 桥接
 
-如果你使用的是带有图形界面的桌面客户端（例如 **Claude Desktop** 或 IDE 插件），直接双击桌面图标可能无法生效，原因有两点：
-1. **Windows 环境变量继承机制**：`setx` 写入注册表后，开机就已运行的桌面外壳（`explorer.exe`）不会自动热更新环境变量，双击启动的程序继承不到。
-2. **中转自启动依赖**：原版的自启动只写在 CLI 的 `wrapper\claude.cmd` 里，双击 GUI 客户端不会触发终端 wrapper，导致后台 8400 端口的中转没启动。
+1. 确保本地 Antigravity Tools 已启动并监听在 `8045` 端口（提供 Anthropic 兼容端点）。
+2. 在 `config.json` 中配置：
+   ```json
+   {
+     "antigravity_key": "",
+     "antigravity_exe": "C:\\path\\to\\antigravity-tools.exe",
+     "upstreams": {
+       "antigravity": {
+         "base": "http://127.0.0.1:8045",
+         "key_env": "antigravity_key",
+         "proxy_url": "direct"
+       }
+     }
+   }
+   ```
+3. 验证端点连通性：在 Web 仪表盘点击 **Gemini 探针** 或调用 `GET /api/probe?name=antigravity`。
 
-### 推荐解决方式（任选其一）
+---
 
-#### 方式 A：双击专用的桌面启动器（最方便，零配置）
-直接双击项目根目录下的 **`start_desktop.bat`**：
-- 脚本会自动静默拉起后台中转（8400）与 UI（8610）
-- 为图形客户端临时注入完整的 `ANTHROPIC_*` 代理环境变量
-- 自动拉起已安装的 Claude 桌面客户端
+## 4. Claude Code 配置注入
 
-#### 方式 B：配置 Claude 统一设置文件（一劳永逸）
-在你的用户目录打开或创建：`%USERPROFILE%\.claude\settings.json`（即 `C:\Users\<你>\.claude\settings.json`），在其中加入 `"env"` 块：
+`cc-relay` 支持一键将中转路由所需的环境变量增量合并至用户全局 Claude 配置文件 `~/.claude/settings.json`。
+
+### 方式 A：自动化注入脚本（推荐）
+
+```bash
+# 预览即将写入的配置（安全只读）
+python apply_settings.py --dry-run
+
+# 正式执行安全增量合并
+python apply_settings.py
+```
+
+`apply_settings.py` 会动态读取当前 `config.json` 的监听端口与 `fake_api_key`，并将以下变量合并至 `settings.json` 的 `env` 节点中，**绝不丢失或覆盖已有的其他自定义环境变量**：
+
 ```json
 {
   "env": {
@@ -359,45 +149,128 @@ claude
   }
 }
 ```
-> 所有由 Claude 驱动的桌面版、Code 引擎及 IDE 插件（VS Code、JetBrains）都会直接读取该文件中的环境变量，彻底避开 Windows 环境变量继承问题。使用前只需确保中转服务在跑（`python lifecycle.py autostart`）。
 
-#### 方式 C：官方 Claude Desktop 聊天端配置第三方推理
-如果使用的是 Anthropic 官方的 Claude Desktop 客户端：
-- 点击顶部菜单栏：**Developer（开发者）** → **Configure Third-Party Inference...（配置第三方推理）**
-- **Base URL**：填入 `http://127.0.0.1:8400`
-- **API Key**：填入 `sk-relay-local-0000`
+### 方式 B：终端临时环境变量
 
----
+如果不希望更改全局配置文件，可在各终端中单独注入：
 
-## 10. 卸载 / 关掉自启动
+**Windows PowerShell:**
+```powershell
+$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8400"
+$env:ANTHROPIC_AUTH_TOKEN="sk-relay-local-0000"
+$env:ANTHROPIC_MODEL="relay-main[1m]"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL="OPUS_MODEL[1m]"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL="SONNET_MODEL[1m]"
+$env:ANTHROPIC_SMALL_FAST_MODEL="FAST_MODEL[1m]"
+claude
+```
 
-1. 删掉 `C:\Users\<你>\bin\claude.cmd`（或把该目录从 PATH 里移除）
-2. 删掉第 6 节那几个 `ANTHROPIC_*` 环境变量（`setx ANTHROPIC_MODEL ""` 之类，或图形界面删）
-3. `python lifecycle.py stopall`，然后删掉整个项目目录
-4. 如已登录过 Codex，按需删除 `C:\Users\<你>\.cli-proxy-api\`
-
----
-
-## 11. 故障排查
-
-| 现象 | 原因 / 处理 |
-|---|---|
-| 敲 `claude` 没反应 / CC 报连接失败 | 中转没起来。`python lifecycle.py status` 看 `relay_up`；直接 `python cc_relay.py serve` 看报错 |
-| 「改了配置没生效」 | 旧实例还占着 8400/8610。`netstat -ano \| findstr ":8400 :8610"` 找到 PID，`taskkill /F /PID <pid>` 后再起 |
-| CC 提示未知模型 / 上下文窗口不对 | 模型名带上 `[1m]` 后缀 |
-| DeepSeek 报 401 | `real_deepseek_key` 不对，或 `upstreams.deepseek.base` 被改坏了 |
-| Codex 报 401 / 403 | ① 没登录：`cli-proxy-api.exe -codex-login`；② `codex_proxy_key` 与 `config.yaml` 的 `api-keys` 不一致；③ 8317 没起来 |
-| Codex 请求超时 / 连不上上游 | 代理没开。检查 `codex-proxy/config.yaml` 的 `proxy-url` 端口，或系统代理是否在运行 |
-| UI 打不开 | 8610 被占或中转没起；`python cc_relay.py ui` 单独起 UI 试试 |
-| 托盘/黑窗一闪而过 | wrapper 里的中文或 LF 换行会让 `cmd` 崩。改成纯 ASCII + CRLF |
-| 想彻底重置抓包 | UI 上「清零」，或删 `records.jsonl`（会同时丢历史） |
+**macOS / Linux Bash / Zsh:**
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8400"
+export ANTHROPIC_AUTH_TOKEN="sk-relay-local-0000"
+export ANTHROPIC_MODEL="relay-main[1m]"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="OPUS_MODEL[1m]"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="SONNET_MODEL[1m]"
+export ANTHROPIC_SMALL_FAST_MODEL="FAST_MODEL[1m]"
+claude
+```
 
 ---
 
-## 附：最小验证清单
+## 5. Windows 无感自动化体验 (Wrapper & Lifecycle)
 
-- [ ] `where claude` 第一条是 wrapper
-- [ ] `python lifecycle.py status` → `relay_up: true`、`ui_up: true`
-- [ ] 敲 `claude` → UI 自动弹出，CC 能正常回复
-- [ ] UI 抓包查看器能看到刚才那条请求，规则标签符合预期（`hybrid:main` / `hybrid:opus` …）
-- [ ] 退出 CC ~10 秒后中转自动关闭（`python lifecycle.py status` → false）
+为了让使用体验如丝般顺滑，项目内置了 Windows 环境下的包装器（Wrapper）与后台自动化机制：
+
+### 5.1 设置 Wrapper 优先执行
+
+1. 将 `C:\path\to\cc-relay\wrapper` 目录添加至系统环境变量 `PATH`，且**排在 npm 全局目录之前**。
+2. 当你在任何控制台输入 `claude` 时：
+   - `wrapper/claude.cmd` 会被优先调用；
+   - 自动执行 `python lifecycle.py autostart` 秒级唤醒中转服务；
+   - 自动拉起后台 `lifecycle.py watch` 守护进程；
+   - 无缝转接执行原生的 Claude Code。
+3. 当所有 `claude.exe` 进程退出后，看门狗在检测到空闲超时后会自动停止中转与 Codex 上游，释放系统资源。
+
+### 5.2 桌面快捷方式
+
+双击 `start_desktop.bat` 可快速启动服务并自动在默认浏览器中打开 Web 监控仪表盘（`http://127.0.0.1:8610`）。
+
+---
+
+## 6. macOS / Linux 守护与服务化
+
+在 POSIX 环境下，你可以使用 `systemd`（Linux）或 `launchd`（macOS）将 `cc-relay` 常驻为后台用户服务。
+
+### 6.1 Linux Systemd 用户服务配置
+
+创建文件 `~/.config/systemd/user/cc-relay.service`：
+
+```ini
+[Unit]
+Description=Claude Code Multi-Upstream Relay
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/your-user/cc-relay
+ExecStart=/usr/bin/python3 cc_relay.py serve
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+启用与启动服务：
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now cc-relay.service
+systemctl --user status cc-relay.service
+```
+
+---
+
+## 7. 日常运维与诊断命令
+
+| 需求场景 | 执行命令 |
+| :--- | :--- |
+| **前台调试启动** | `python cc_relay.py serve` |
+| **前台无 UI 启动** | `python cc_relay.py serve --no-ui` |
+| **查看运行时服务与进程状态** | `python lifecycle.py status` |
+| **一键停止中转与所有 Sidecar**| `python lifecycle.py stopall` |
+| **查看最近 10 条调用抓包摘要**| `python cc_relay.py last 10` |
+| **查看流量统计分布** | `python cc_relay.py stats` |
+| **测试配置注入 Dry-Run** | `python apply_settings.py --dry-run` |
+
+---
+
+## 8. 常见故障排查 FAQ
+
+### Q1: 启动时报错 `[Errno 10048]` / `Address already in use` (端口被占用)
+- **原因**：8400 (Relay) 或 8610 (UI) 端口被残留进程或其它应用占用。
+- **解决**：
+  - Windows 执行：`python lifecycle.py stopall` 强制清理残留。
+  - 或在 `config.json` 中修改 `"listen_port"` 与 `"ui_port"` 为未占用端口，并重新运行 `python apply_settings.py`。
+
+### Q2: 提示 `401 Unauthorized` 或 `invalid api key`
+- **原因**：Claude Code 传入的 Token 与 `config.json` 中的 `fake_api_key` 不匹配。
+- **解决**：
+  - 检查 `config.json` 中的 `"fake_api_key"`（默认 `sk-relay-local-0000`）。
+  - 重新运行 `python apply_settings.py` 刷新 `~/.claude/settings.json`。
+
+### Q3: 切换到 Codex 上游后报错 `502 Bad Gateway`
+- **原因**：`codex-proxy` (CLIProxyAPI) 尚未启动，或 OAuth 登录已过期。
+- **解决**：
+  - 检查 `http://127.0.0.1:8317/v1/models` 是否能正常访问。
+  - 手动运行 `codex-proxy/start_proxy.bat` 检查是否有登录或代理报错。
+
+### Q4: 切换到 Gemini 上游提示 `503 No available accounts`
+- **原因**：该错误直接源自 Antigravity Tools 本地端点（8045），说明当前绑定的 Google 账号配额耗尽或失效。
+- **解决**：打开 Antigravity Tools 客户端刷新/重新登录 Google 账号。
+
+### Q5: 为什么在 Web UI 中看到的 Prompt 缓存命中率较低？
+- **原因**：
+  1. 上游模型本身未开启或不支持 Prompt Caching；
+  2. 连续两次请求的 System Prompt 或历史上下文发生了剧烈变动；
+  3. 注意：`cc-relay` 的 `builtin` 修剪模式已具备断点顺延算法，不会破坏缓存连续性。

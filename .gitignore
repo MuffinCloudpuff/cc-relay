@@ -1,40 +1,62 @@
-# ── 密钥 / 凭证（绝对不能提交）──
+# ── 密钥与凭证（严禁提交）──
 config.json
+*.key
+*.pem
 codex-proxy/config.yaml
 codex-proxy/.proxy_key
 .proxy_key
 .cli-proxy-api/
-*.key
-*.pem
 
-# ── 运行时产物 ──
+# ── 运行时流量、提示词抓包与缓存数据 ──
 records.jsonl
 *.jsonl
-!config.example.json
-old/
-__pycache__/
-*.pyc
+prompts.json
+relay-status.json
+.update-status.json
 .watch.pid
 *.pid
+*.tmp
+
+# ── 日志与诊断产物 ──
+*.log
 serve.log
 sentinel.log
+_diag.log
 codex-proxy/*.log
 codex-proxy/proxy.*.log
 login.log
 
-# ── 大型二进制（自行下载）──
+# ── 备份与历史归档文件 ──
+*.bak*
+*.bak
+*.bak-*
+ui.html.bak-*
+config.json.bak-*
+lifecycle.py.bak-*
+old/
+_ref.png
+
+# ── Python 字节码与缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ── 大型二进制与外部依赖 ──
 codex-proxy/cli-proxy-api.exe
+codex-proxy/LICENSE
+codex-proxy/README*.md
 *.exe
 
-# ── 编辑器 / 系统 ──
+# ── 编辑器与操作系统 ──
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# ── 运行时产物(续) ──
-prompts.json
-.update-status.json
-relay-status.json
-_diag.log
-.claude/
+# ── 历史遗留与临时独立脚本 ──
+guardian.py
+sentinel.py
+
+# ── 示例文件白名单保证 ──
+!config.example.json
+!codex-proxy/config.example.yaml

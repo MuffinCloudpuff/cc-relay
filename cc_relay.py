@@ -269,7 +269,6 @@ CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "
 DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 # Antigravity 8045 的运行时模型优先; 这些只用于上游不可用时的安全回退。
 GEMINI_MODELS = ["gemini-3.7-flash-low", "gemini-3.7-flash-thinking", "gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
-ALL_MODELS = DEEPSEEK_MODELS + CODEX_MODELS + GEMINI_MODELS
 DEFAULT_CODEX_MAP = "gpt-5.6-sol"
 DEFAULT_DS_MAP = "deepseek-flash"
 DEFAULT_GEMINI_MAP = "gemini-3.7-flash-low"
@@ -287,8 +286,6 @@ REASONING_MAP = {
     "max":     {"type": "enabled", "budget_tokens": 65536},
 }
 EFFORT_VALUES = tuple(REASONING_MAP)
-REASONING_LABELS = {"off": "关闭", "on": "开启", "instant": "即时", "low": "低", "medium": "中",
-                    "high": "高", "xhigh": "极高", "max": "最大"}
 _MODELS_CACHE = {"ts": 0, "ds": list(DEEPSEEK_MODELS), "cx": list(CODEX_MODELS),
                  "gm": list(GEMINI_MODELS), "health": {}}
 
@@ -721,7 +718,7 @@ class PromptManager:
 _PROMPT_MGR = PromptManager()
 
 
-def pick_route(conf, method, path, headers, body_json, body_raw):
+def pick_route(conf, headers, body_json):
     """统一路由: 返回 (upstream_name, map_model|None, reason)
     router.route = "hybrid" | "codex" | "deepseek" | "antigravity"
     router.model = 全量路由的指定模型(可空=用默认)
@@ -753,7 +750,6 @@ def pick_route(conf, method, path, headers, body_json, body_raw):
     # hybrid: 高价值档(plan) -> 高价值模型; 其余按档位 -> 各自模型; 上游随所选模型决定
     hv = (router.get("hybrid_codex_model") or router.get("model") or "").strip() or DEFAULT_CODEX_MAP
     dd = (router.get("hybrid_deepseek_model") or "").strip() or DEFAULT_DS_MAP
-    gg = (router.get("hybrid_antigravity_model") or "").strip() or DEFAULT_GEMINI_MAP
     # 五档位模型(hybrid 下)
     tier = router.get("tiers") or {}
     def _up(m):
@@ -1041,6 +1037,29 @@ class Relay(BaseHTTPRequestHandler):
             self.server.conf = conf
         except Exception:
             conf = self.server.conf
+
+        # 下游 fake_api_key 认证校验 (支持 Bearer / x-api-key, 常量时间比对防时序攻击)
+        fake_key = (conf.get("fake_api_key") or "").strip()
+        if fake_key and not self.path.startswith("/api/"):
+            auth_hdr = self.headers.get("Authorization", "").strip()
+            bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+            x_api_key = self.headers.get("x-api-key", "").strip()
+            import hmac
+            valid = False
+            if bearer_tok and hmac.compare_digest(bearer_tok, fake_key):
+                valid = True
+            elif x_api_key and hmac.compare_digest(x_api_key, fake_key):
+                valid = True
+            if not valid:
+                msg = json.dumps({"error": {"type": "authentication_error", "message": "invalid api key"}}).encode()
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                if method != "HEAD":
+                    self.wfile.write(msg)
+                return
+
         # /v1/models 探测: 聚合三上游模型列表(供 CC 识别)
         if self.path.split("?")[0] == "/v1/models" and method == "GET":
             lm = live_models(conf)
@@ -1066,7 +1085,7 @@ class Relay(BaseHTTPRequestHandler):
             except Exception:
                 body_json = None
 
-        up_name, map_model, reason = pick_route(conf, method, path, self.headers, body_json, raw)
+        up_name, map_model, reason = pick_route(conf, self.headers, body_json)
 
         # 若路由到外部 sidecar, 尽量懒启动; 不因启动失败吞掉后续可诊断错误。
         if up_name == "codex" and not codex_up():

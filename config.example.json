@@ -1,16 +1,15 @@
 {
   "listen_host": "127.0.0.1",
   "listen_port": 8400,
+  "ui_port": 8610,
   "fake_api_key": "sk-relay-local-0000",
   "real_deepseek_key": "sk-your-deepseek-key-here",
-  "record_dir": "",
-  "max_body_capture": 2000000,
-  "proxy_url": "",
   "codex_proxy_key": "your-codex-proxy-key-here",
+  "antigravity_key": "",
   "codex_exe": "",
   "codex_config": "",
-  "antigravity_key": "",
   "antigravity_exe": "",
+  "max_body_capture": 2000000,
   "upstreams": {
     "deepseek": {
       "base": "https://api.deepseek.com/anthropic",
@@ -25,30 +24,31 @@
     "antigravity": {
       "base": "http://127.0.0.1:8045",
       "key_env": "antigravity_key",
-      "proxy_url": "direct",
-      "provider": "gemini"
+      "proxy_url": "direct"
     }
   },
   "tools": {
-    "antigravity": {"auto_start": true, "stop_on_exit": false}
+    "antigravity": {
+      "auto_start": true
+    }
   },
   "router": {
     "route": "hybrid",
     "hybrid_codex_model": "gpt-5.6-sol",
     "hybrid_deepseek_model": "deepseek-flash",
     "hybrid_antigravity_model": "gemini-3.7-flash-low",
-    "effort": "high",
+    "effort": "medium",
     "tiers": {
-      "main": "gemini-3.7-flash-medium",
-      "opus": "deepseek-flash",
-      "sonnet": "gpt-5.6-luna",
-      "fast": "gemini-3.5-flash-low",
-      "agent": "gpt-5.6-terra"
+      "main": "deepseek-flash",
+      "opus": "gpt-5.6-sol",
+      "sonnet": "deepseek-flash",
+      "fast": "deepseek-flash",
+      "agent": "deepseek-flash"
     },
     "tier_efforts": {
       "main": "medium",
-      "opus": "medium",
-      "sonnet": "instant",
+      "opus": "high",
+      "sonnet": "medium",
       "fast": "instant",
       "agent": "medium"
     },
@@ -60,13 +60,16 @@
       "agent": false
     },
     "modifier_mode": "custom",
+    "gemini_modifier": "builtin",
     "tier_modifier": {
       "main": "builtin",
-      "fast": "builtin",
       "opus": "original",
-      "agent": "original",
-      "sonnet": "original"
+      "sonnet": "original",
+      "fast": "builtin",
+      "agent": "original"
     }
   },
-  "ui_port": 8610
+  "model_routes": {
+    "gemini-exp-*": "antigravity"
+  }
 }
