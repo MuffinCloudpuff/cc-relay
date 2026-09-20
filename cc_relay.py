@@ -14,7 +14,7 @@ CC 统一中转 (unified relay)
     python cc_relay.py stats | last [n] | dump <idx>
     python cc_relay.py startproxy | stopproxy     # 手动管理 codex 上游
 """
-import os, sys, json, time, threading, argparse, subprocess, socket, ipaddress
+import os, sys, json, time, threading, argparse, subprocess, socket, re, ipaddress
 import urllib.request, urllib.error
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -30,7 +30,10 @@ _UP = {"last": "", "last_model": "", "last_ts": 0}
 
 def load_conf():
     with open(CONF, encoding="utf-8") as f:
-        return json.load(f)
+        conf = json.load(f)
+    if _repair_misplaced_upstream_key(conf):
+        _save_conf(conf)
+    return conf
 
 
 CONF_LOCK = threading.Lock()
@@ -42,6 +45,38 @@ def _save_conf(conf):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(conf, f, ensure_ascii=False, indent=2)
     os.replace(tmp, CONF)
+
+
+_KEY_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _safe_key_env_name(value):
+    """Return a config key name only when it cannot itself be a credential."""
+    value = str(value or "")
+    return value if _KEY_ENV_NAME_RE.fullmatch(value) else ""
+
+
+def _repair_misplaced_upstream_key(conf):
+    """Recover a key pasted into upstream.key_env by an older/broken UI.
+
+    key_env is metadata naming a top-level config field, never a place to keep
+    the credential itself. A malformed value (for example a key containing a
+    hyphen) cannot be an environment-style config key, so move it to the
+    conventional provider key field without logging or returning the value.
+    """
+    changed = False
+    for name, upstream in (conf.get("upstreams") or {}).items():
+        if not isinstance(upstream, dict):
+            continue
+        key_env = str(upstream.get("key_env") or "")
+        if not key_env or _safe_key_env_name(key_env):
+            continue
+        target = "antigravity_key" if name in ("antigravity", "gemini") else f"{name}_key"
+        if not str(conf.get(target) or "").strip():
+            conf[target] = key_env
+        upstream["key_env"] = target
+        changed = True
+    return changed
 
 
 _CONFIG_KEY_MASK = "••••••••"
@@ -83,7 +118,7 @@ def _config_public_view(conf):
     for name, upstream in (conf.get("upstreams") or {}).items():
         if not isinstance(upstream, dict):
             continue
-        key_env = str(upstream.get("key_env") or "")
+        key_env = _safe_key_env_name(upstream.get("key_env"))
         key = conf.get(key_env, "") if key_env else ""
         upstreams[str(name)] = {
             "base": str(upstream.get("base") or ""),
@@ -122,7 +157,9 @@ def _apply_config_update(conf, data):
                 upstream["proxy_url"] = _normalize_config_url(
                     patch["proxy_url"], f"upstreams.{name}.proxy_url",
                     allow_empty=True, allow_direct=True)
-            key_env = str(upstream.get("key_env") or "")
+            key_env = _safe_key_env_name(upstream.get("key_env"))
+            if not key_env:
+                raise ValueError(f"upstreams.{name} has an invalid key_env")
             if "key" in patch:
                 key = patch["key"]
                 if not isinstance(key, str):
@@ -325,7 +362,7 @@ def _upstream_conf(conf, name):
 
 
 def _key_for(conf, up):
-    return conf.get(up.get("key_env") or "", "") or ""
+    return conf.get(_safe_key_env_name(up.get("key_env")), "") or ""
 
 
 def provider_for_model(model, conf=None):
@@ -577,7 +614,10 @@ _MOD_MGR = ModifierManager()
 
 # ---------- 各档位 System 提示词管理 (复用运行时抓包 + 在线编辑) ----------
 PROMPTS_FILE = os.path.join(BASE, "prompts.json")
-PROMPTS_LOCK = threading.Lock()
+# PromptManager.update_tier()/capture() hold this lock while calling save().
+# This must be re-entrant: a plain Lock leaves the UI request waiting forever
+# when it tries to persist a prompt or a per-tier modifier choice.
+PROMPTS_LOCK = threading.RLock()
 
 
 class PromptManager:
@@ -901,31 +941,117 @@ def _resp_cache_usage(resp_body):
     }
 
 
-def _iter_records_tail(max_records=400, max_bytes=16_000_000):
-    """从文件末尾向前读, 拿够 max_records 条或到 max_bytes 为止(避免单条巨大导致读不到)"""
+def _iter_records_tail(max_records=400, max_bytes=500_000_000):
+    """从文件末尾逆序向前读, 拿够 max_records 条或到 max_bytes 为止(逆序块流式快速解析, 支持单条超大记录)"""
     if not os.path.exists(RECORDS):
         return []
-    size = os.path.getsize(RECORDS)
-    chunk = 2_000_000
-    buf = b""
+    try:
+        size = os.path.getsize(RECORDS)
+    except OSError:
+        return []
+    if size == 0:
+        return []
+
+    chunk_size = 4_000_000
     pos = size
-    while pos > 0 and buf.count(b"\n") <= max_records and len(buf) < max_bytes:
-        read = min(chunk, pos)
-        pos -= read
-        with open(RECORDS, "rb") as f:
+    records = []
+    trailing = b""
+    bytes_read = 0
+
+    with open(RECORDS, "rb") as f:
+        while pos > 0 and len(records) < max_records and bytes_read < max_bytes:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
             f.seek(pos)
-            buf = f.read(read) + buf
-    lines = buf.split(b"\n")
-    out = []
-    for ln in lines:
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            out.append(json.loads(ln.decode("utf-8", "replace")))
-        except Exception:
-            pass
-    return out[-max_records:]
+            chunk = f.read(read_size)
+            bytes_read += read_size
+            buf = chunk + trailing
+            lines = buf.split(b"\n")
+            if pos > 0:
+                trailing = lines[0]
+                complete_lines = lines[1:]
+            else:
+                trailing = b""
+                complete_lines = lines
+
+            for raw_line in reversed(complete_lines):
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    records.append(json.loads(raw_line.decode("utf-8", "replace")))
+                    if len(records) >= max_records:
+                        break
+                except Exception:
+                    pass
+
+        if trailing and len(records) < max_records:
+            t = trailing.strip()
+            if t:
+                try:
+                    records.append(json.loads(t.decode("utf-8", "replace")))
+                except Exception:
+                    pass
+
+    records.reverse()
+    return records
+
+
+def _find_record_by_idx(target_idx, max_bytes=800_000_000):
+    """高效逆序定位单个历史抓包详情, 支持从海量大记录中精准抓取"""
+    if not os.path.exists(RECORDS):
+        return None
+    target_idx_str = str(target_idx)
+    target_pattern = f'"idx": {target_idx_str}'.encode("utf-8")
+    target_pattern2 = f'"idx":{target_idx_str}'.encode("utf-8")
+    target_pattern3 = f'"idx": "{target_idx_str}"'.encode("utf-8")
+
+    try:
+        size = os.path.getsize(RECORDS)
+    except OSError:
+        return None
+    if size == 0:
+        return None
+
+    chunk_size = 4_000_000
+    pos = size
+    trailing = b""
+    bytes_read = 0
+
+    with open(RECORDS, "rb") as f:
+        while pos > 0 and bytes_read < max_bytes:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            bytes_read += read_size
+            buf = chunk + trailing
+            lines = buf.split(b"\n")
+            if pos > 0:
+                trailing = lines[0]
+                complete_lines = lines[1:]
+            else:
+                trailing = b""
+                complete_lines = lines
+
+            for raw_line in reversed(complete_lines):
+                if target_pattern in raw_line or target_pattern2 in raw_line or target_pattern3 in raw_line:
+                    try:
+                        r = json.loads(raw_line.decode("utf-8", "replace"))
+                        if str(r.get("idx")) == target_idx_str:
+                            return r
+                    except Exception:
+                        pass
+
+        if trailing and (target_pattern in trailing or target_pattern2 in trailing or target_pattern3 in trailing):
+            try:
+                r = json.loads(trailing.decode("utf-8", "replace"))
+                if str(r.get("idx")) == target_idx_str:
+                    return r
+            except Exception:
+                pass
+
+    return None
 
 
 def stats_snapshot():
@@ -1308,6 +1434,26 @@ class Relay(BaseHTTPRequestHandler):
     def do_DELETE(self): self._do("DELETE")
 
 
+def read_ui_content():
+    """读取 UI 页面: 优先读工作目录外部文件(方便调试热更), 回退读 PyInstaller 资源目录"""
+    p = os.path.join(BASE, "ui.html")
+    if os.path.isfile(p):
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    if hasattr(sys, "_MEIPASS"):
+        bp = os.path.join(sys._MEIPASS, "ui.html")
+        if os.path.isfile(bp):
+            try:
+                with open(bp, "rb") as f:
+                    return f.read()
+            except Exception:
+                pass
+    raise FileNotFoundError("ui.html not found")
+
+
 class UIHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1323,7 +1469,7 @@ class UIHandler(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def _manager_write_allowed(self):
-        """Require an actual same-origin JSON fetch for the new Manager write route."""
+        """Require a same-origin JSON fetch from the local UI before changing Manager state."""
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         host = (self.headers.get("Host") or "").strip()
         origin = (self.headers.get("Origin") or "").strip()
@@ -1340,7 +1486,7 @@ class UIHandler(BaseHTTPRequestHandler):
             return False
 
     def _manager_host_allowed(self, host):
-        """Only serve Manager data to a literal loopback/localhost UI host."""
+        """Only expose Manager status/control to literal loopback or localhost UI hosts."""
         if any(char in host for char in "/\\@ "):
             return False
         try:
@@ -1396,9 +1542,9 @@ class UIHandler(BaseHTTPRequestHandler):
         """最近 N 条调用摘要(抓包查看器): CC发了什么 / 我们选了谁转发"""
         from urllib.parse import urlparse, parse_qs
         q = parse_qs(urlparse(self.path).query)
-        n = int((q.get("n") or ["60"])[0])
-        n = max(1, min(n, 500))
-        recs = _iter_records_tail(max_records=n, max_bytes=32_000_000)
+        n = int((q.get("n") or ["100"])[0])
+        n = max(1, min(n, 1000))
+        recs = _iter_records_tail(max_records=n, max_bytes=600_000_000)
         out = []
         for r in recs:
             b = r.get("body") or {}
@@ -1419,6 +1565,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 "tools": len(b.get("tools") or []),
                 "stream": b.get("stream"),
                 "cache": cache,
+                "resp_error": r.get("resp_error"),
+                "has_custom_prompt": bool(r.get("custom_prompt")),
+                "stripped_banner": bool(r.get("stripped_banner")),
             })
         return {"calls": out, "total": len(out)}
 
@@ -1429,11 +1578,11 @@ class UIHandler(BaseHTTPRequestHandler):
         idx = (q.get("idx") or [None])[0]
         if idx is None:
             return {"error": "missing idx"}
-        for r in _iter_records_tail(max_records=500, max_bytes=20_000_000):
-            if str(r.get("idx")) == str(idx):
-                out = dict(r)
-                out["cache"] = _resp_cache_usage(r.get("resp_body"))
-                return out
+        r = _find_record_by_idx(idx)
+        if r:
+            out = dict(r)
+            out["cache"] = _resp_cache_usage(r.get("resp_body"))
+            return out
         return {"error": "not found"}
 
     def do_GET(self):
@@ -1462,14 +1611,14 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(self._call_detail())
         elif self.path in ("/", "/index.html"):
             try:
-                b = open(os.path.join(BASE, "ui.html"), "rb").read()
+                b = read_ui_content()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
                 self.wfile.write(b)
-            except Exception:
-                self._json({"error": "ui missing"}, 500)
+            except Exception as e:
+                self._json({"error": "ui missing: %s" % e}, 500)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -1643,6 +1792,12 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "tier": tier})
             else:
                 self._json({"error": "invalid tier"}, 400)
+        elif p == "/api/shutdown":
+            self._json({"ok": True, "message": "cc-relay shutting down..."})
+            def _kill():
+                time.sleep(0.4)
+                os._exit(0)
+            threading.Thread(target=_kill, daemon=True).start()
         else:
             self._json({"error": "not found"}, 404)
 
