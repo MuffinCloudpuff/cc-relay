@@ -14,9 +14,11 @@ CC 统一中转 (unified relay)
     python cc_relay.py stats | last [n] | dump <idx>
     python cc_relay.py startproxy | stopproxy     # 手动管理 codex 上游
 """
-import os, sys, json, time, threading, argparse, subprocess, socket, re
+import os, sys, json, time, threading, argparse, subprocess, socket, re, ipaddress
 import urllib.request, urllib.error
+from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import manager_control
 
 BASE = os.environ.get("CC_RELAY_DIR") or os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(BASE, "config.json")
@@ -1409,6 +1411,76 @@ class UIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _manager_write_allowed(self):
+        """Require an actual same-origin JSON fetch for the new Manager write route."""
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        host = (self.headers.get("Host") or "").strip()
+        origin = (self.headers.get("Origin") or "").strip()
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if (content_type != "application/json" or not host or not origin or fetch_site == "cross-site" or
+                not self._manager_host_allowed(host)):
+            return False
+        try:
+            parsed = urlsplit(origin)
+            return (parsed.scheme == "http" and not parsed.username and not parsed.password and
+                    not parsed.path.rstrip("/") and not parsed.query and not parsed.fragment and
+                    parsed.netloc.lower() == host.lower())
+        except ValueError:
+            return False
+
+    def _manager_host_allowed(self, host):
+        """Only serve Manager data to a literal loopback/localhost UI host."""
+        if any(char in host for char in "/\\@ "):
+            return False
+        try:
+            parsed = urlsplit("//" + host)
+            if parsed.username or parsed.password or not parsed.hostname:
+                return False
+            port = parsed.port if parsed.port is not None else 80
+            if port != self.server.server_port:
+                return False
+            hostname = parsed.hostname.lower()
+            if hostname == "localhost":
+                return True
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
+
+    def _manager_action(self):
+        if not self._manager_write_allowed():
+            self._json({"error": "same-origin JSON request required"}, 403)
+            return
+        if self.headers.get("Transfer-Encoding"):
+            self._json({"error": "invalid request"}, 400)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "")
+        except ValueError:
+            self._json({"error": "invalid request"}, 400)
+            return
+        if length < 0 or length > 16 * 1024:
+            self._json({"error": "request too large"}, 413)
+            return
+        try:
+            raw = self.rfile.read(length)
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            self._json({"error": "invalid JSON"}, 400)
+            return
+        if not isinstance(data, dict) or set(data) - {"action", "confirm"}:
+            self._json({"error": "invalid Manager action"}, 400)
+            return
+        action = data.get("action")
+        confirm = data.get("confirm", False)
+        if action not in manager_control.ALLOWED_ACTIONS or not isinstance(confirm, bool):
+            self._json({"error": "invalid Manager action"}, 400)
+            return
+        if action == "stop" and not confirm:
+            self._json({"error": "stop requires confirmation"}, 400)
+            return
+        result = manager_control.control_from_config(load_conf(), BASE).action(action, confirm)
+        self._json(result, 200 if result.get("ok") else 503 if result.get("error") == manager_control.UNAVAILABLE_MESSAGE else 400)
+
     def _calls(self):
         """最近 N 条调用摘要(抓包查看器): CC发了什么 / 我们选了谁转发"""
         from urllib.parse import urlparse, parse_qs
@@ -1466,6 +1538,11 @@ class UIHandler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             name = (q.get("name") or ["antigravity"])[0]
             self._json(probe_upstream(load_conf(), name))
+        elif self.path.split("?", 1)[0] == "/api/manager/status":
+            if self._manager_host_allowed((self.headers.get("Host") or "").strip()):
+                self._json(manager_control.control_from_config(load_conf(), BASE).status())
+            else:
+                self._json({"error": "loopback host required"}, 403)
         elif self.path.startswith("/api/prompts"):
             self._json(_PROMPT_MGR.get_data())
         elif self.path.startswith("/api/calls"):
@@ -1486,6 +1563,9 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path.split("?", 1)[0] == "/api/manager/action":
+            self._manager_action()
+            return
         ln = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(ln).decode() if ln else "{}"
         try:
