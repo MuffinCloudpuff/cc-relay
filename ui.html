@@ -209,6 +209,10 @@
   table.tf .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#30363d;margin-right:7px;vertical-align:1px}
   table.tf .dot.on{background:var(--hb);box-shadow:0 0 6px var(--hb)}
   table.tf .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .cache-ok{color:var(--hb)}
+  .cache-warn{color:var(--amber);font-weight:600}
+  .cache-bad{color:var(--red);font-weight:700}
+  .cache-none{color:var(--faint)}
   .tagc{display:inline-block;font-size:10.5px;padding:2px 9px;border-radius:99px;font-weight:600}
   .tagc.codex{background:var(--cx-soft);color:var(--cx)}
   .tagc.deepseek{background:var(--ds-soft);color:var(--ds)}
@@ -700,6 +704,20 @@ async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET'
 const noJunk=m=>m&&!m.startsWith('gpt-image')&&m!=='codex-auto-review';
 const isCodex=m=>m&&m.startsWith('gpt-')&&!m.startsWith('gpt-image')&&m!=='codex-auto-review';
 const escHtml=s=>(s==null?'-':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const cacheSummary=c=>{
+  const x=c&&c.cache;
+  if(!x||x.cache_hit_rate==null)return {label:'—',title:'上游未返回缓存 usage'};
+  const pct=(Number(x.cache_hit_rate)*100).toFixed(1)+'%';
+  return {label:pct,title:'命中 '+(x.cache_read_tokens||0).toLocaleString()+' / 总 '+(x.cache_total_tokens||0).toLocaleString()+' token'};
+};
+const trafficCacheSummary=r=>{
+  const rate=Number(r&&r.cache_hit_rate);
+  const total=Number(r&&r.input_tokens)||0;
+  if(!Number.isFinite(rate)||r.cache_hit_rate==null)return {label:'—',className:'cache-none',title:'暂无可用缓存 usage'};
+  const pct=(rate*100).toFixed(1)+'%';
+  const className=rate<.6?'cache-bad':(rate<.9?'cache-warn':'cache-ok');
+  return {label:pct,className,title:'命中 '+Number(r.cache_read_tokens||0).toLocaleString()+' / 输入总计 '+total.toLocaleString()+' token；缓存写入 '+Number(r.cache_creation_tokens||0).toLocaleString()+'；统计 '+Number(r.cache_requests||0).toLocaleString()+' 次'};
+};
 
 // ── Codex 风格选择器: 点击①出"选择强度"滑块 → 点模型名切"选择模型"列表 ──
 function buildSel(sel, models, curModel, curEff){
@@ -932,6 +950,7 @@ $('#tab-dashboard').addEventListener('click',()=>{
 // ── 状态刷新 ──
 async function refresh(){
   st=await api('/api/status');
+  const _sy=window.scrollY;
   const route=st.route||st.mode||'hybrid';
   const ds=route==='deepseek',hb=route==='hybrid',cx=route==='codex',gm=route==='antigravity'||route==='gemini';
   const models={ds:(st.models_ds||[]),cx:(st.models_codex||[]),gm:(st.models_gemini||[])};
@@ -972,6 +991,8 @@ async function refresh(){
   $('#routedot').className='dot on';
 
   $('#cur').innerHTML='Base: <b>http://127.0.0.1:8400</b> ｜ 上游: DeepSeek + Codex(8317) ｜ 假 key: <b>sk-relay-local-0000</b>';
+
+  window.scrollTo(0,_sy);
 }
 const TIER_NAME={main:'主',opus:'explore代理',sonnet:'审查代理',fast:'任务名称代理',agent:'plan代理'};
 async function doSwitch(route,btnId,model){
@@ -1004,9 +1025,11 @@ $('#b-hb').onclick=async()=>{
 $('#b-pstart').onclick=async()=>{await api('/api/proxy',{action:'start'});await refresh()};
 $('#b-pstop').onclick=async()=>{await api('/api/proxy',{action:'stop'});await refresh()};
 async function loadTraffic(){
+  let _sy=0;
   try{
     const t=await api('/api/status');
     const rows=t.rows||[];
+    _sy=window.scrollY;
     $('#tf-since').textContent='代理 '+(t.codex_up?'运行中':'未运行');
     const body=$('#tf-body');
     const req=rows.reduce((a,r)=>a+(r.req||0),0);
@@ -1014,17 +1037,22 @@ async function loadTraffic(){
     const err=rows.reduce((a,r)=>a+(r.err||0),0);
     $('#sum-req').textContent=req;$('#sum-ok').textContent=ok;$('#sum-err').textContent=err;
     if(!rows.length){body.innerHTML='<div class="none">暂无请求…（用 claude 干活后这里会实时滚动）</div>';return}
-    let html='<table class="tf"><thead><tr><th>上游</th><th>实际模型</th><th style="text-align:right">请求</th><th style="text-align:right">成功</th><th style="text-align:right">失败</th><th>最近请求</th></tr></thead><tbody>';
+    let html='<table class="tf"><thead><tr><th>上游</th><th>实际模型</th><th style="text-align:right">请求</th><th style="text-align:right">成功</th><th style="text-align:right">失败</th><th style="text-align:right">输入 Token</th><th style="text-align:right">缓存命中</th><th>最近请求</th></tr></thead><tbody>';
     for(const r of rows){
+      const cs=trafficCacheSummary(r);
+      const tokenLabel=r.cache_requests?Number(r.input_tokens||0).toLocaleString():'—';
       html+='<tr class="'+(r.err?'':'hot')+'"><td><span class="dot'+(r.err?'':' on')+'"></span><span class="tagc '+(r.route==='codex'?'codex':((r.route==='antigravity'||r.route==='gemini')?'gemini':'deepseek'))+'">'+escHtml(r.route)+'</span></td>'+
         '<td class="mono">'+escHtml(r.model)+'</td>'+
         '<td class="mono" style="text-align:right">'+r.req+'</td><td class="mono" style="text-align:right;color:var(--hb)">'+r.ok+'</td>'+
         '<td class="mono" style="text-align:right;color:'+(r.err?'#f85149':'var(--faint)')+'">'+r.err+'</td>'+
+        '<td class="mono" style="text-align:right;color:var(--dim)" title="'+escHtml((r.cache_requests?Number(r.input_tokens||0).toLocaleString():'暂无')+' 输入 token')+'">'+tokenLabel+'</td>'+
+        '<td class="mono '+cs.className+'" style="text-align:right" title="'+escHtml(cs.title)+'">'+cs.label+'</td>'+
         '<td style="color:var(--faint)">#'+r.last+'</td></tr>';
     }
     html+='</tbody></table>';
     body.innerHTML=html;
   }catch(e){}
+  finally{window.scrollTo(0,_sy);}
 }
 $('#b-treset').onclick=async()=>{await api('/api/reset',{});await loadTraffic();loadCalls(true)};
 
@@ -1032,11 +1060,13 @@ $('#b-treset').onclick=async()=>{await api('/api/reset',{});await loadTraffic();
 const _dc={};
 let _clSig=null;
 async function loadCalls(force){
+  let _sy=0;
   try{
     const d=await api('/api/calls?n=500');
     const calls=(d.calls||[]).slice().reverse();
+    _sy=window.scrollY;
     // 数据没变就完全不碰 DOM: 否则每 5s 重绘一次, 会把滚动位置/展开态/选中文字全冲掉
-    const sig=calls.length?calls.map(c=>[c.idx,c.ts,c.orig_model,c.sent_model,c.route,c.route_reason,c.status,c.agent_id?1:0].join('\u0001')).join('\u0002'):'';
+    const sig=calls.length?calls.map(c=>[c.idx,c.ts,c.orig_model,c.sent_model,c.route,c.route_reason,c.status,c.agent_id?1:0,JSON.stringify(c.cache||null)].join('\u0001')).join('\u0002'):'';
     if(!force&&sig===_clSig)return;
     _clSig=sig;
     const body=$('#cl-body');
@@ -1050,10 +1080,12 @@ async function loadCalls(force){
     const dtops={};
     document.querySelectorAll('#cl-body .detail.show').forEach(el=>{dtops[el.id]=el.scrollTop});
     if(!calls.length){body.innerHTML='<div class="none" style="color:var(--faint);padding:18px 0;text-align:center">暂无调用…</div>';return}
-    let html='<table class="cl"><thead><tr><th>时间</th><th>CC 发出</th><th></th><th>选中转发</th><th>上游</th><th>规则</th><th>状态</th><th>来源</th></tr></thead><tbody>';
+    let html='<table class="cl"><thead><tr><th>时间</th><th>CC 发出</th><th></th><th>选中转发</th><th>上游</th><th>规则</th><th>状态</th><th>缓存命中</th><th>来源</th></tr></thead><tbody>';
     for(const c of calls){
       const rel=(c.route_reason||'').replace('hybrid:','h:').replace('route:','r:');
       const cst=c.status||0;
+      const cs=cacheSummary(c);
+      const cacheColor=cs.label==='—'?'var(--faint)':(Number(c.cache.cache_hit_rate)>0?'var(--hb)':'var(--dim)');
       html+='<tr data-idx="'+c.idx+'"><td style="color:var(--faint)">'+escHtml((c.ts||'').slice(11))+'</td>'+
         '<td class="mono">'+escHtml(c.orig_model)+'</td>'+
         '<td class="arrow">→</td>'+
@@ -1061,8 +1093,9 @@ async function loadCalls(force){
         '<td><span class="tagc '+(c.route==='codex'?'codex':((c.route==='antigravity'||c.route==='gemini')?'gemini':'deepseek'))+'">'+escHtml(c.route)+'</span></td>'+
         '<td style="color:var(--faint)">'+escHtml(rel)+'</td>'+
         '<td class="mono" style="color:'+(cst<400?'var(--hb)':'var(--red)')+'">'+cst+'</td>'+
+        '<td class="mono" title="'+escHtml(cs.title)+'" style="color:'+cacheColor+'">'+cs.label+'</td>'+
         '<td>'+(c.agent_id?'<span class="src agent">子代理</span>':'<span class="src main">主循环</span>')+'</td></tr>';
-      html+='<tr><td colspan="8" style="padding:0;border:none"><div class="detail" id="dt-'+c.idx+'"></div></td></tr>';
+      html+='<tr><td colspan="9" style="padding:0;border:none"><div class="detail" id="dt-'+c.idx+'"></div></td></tr>';
     }
     html+='</tbody></table>';
     body.innerHTML=html;
@@ -1076,13 +1109,8 @@ async function loadCalls(force){
       if(c&&c.html){el.innerHTML=c.html;el.scrollTop=keep}
       else{el.textContent='加载中…';el.scrollTop=keep;fetchDetail(id.slice(3)).then(()=>{el.scrollTop=keep})}
     });
-    // 还原视口: 让原来那行仍停在原来的屏幕位置
-    if(anchor){
-      const tr=document.querySelector('#cl-body tr[data-idx="'+anchor.idx+'"]');
-      if(tr){const dy=tr.getBoundingClientRect().top-anchor.top;if(dy)window.scrollBy(0,dy)}
-      else window.scrollTo(0,savedY);
-    }
   }catch(e){}
+  finally{window.scrollTo(0,_sy);}
 }
 // 抓取并渲染某条详情(只渲染, 不切换展开状态) —— 展开态的恢复必须走这里
 async function fetchDetail(idx){
@@ -1094,6 +1122,12 @@ async function fetchDetail(idx){
     const sys=b.system?JSON.stringify(b.system).slice(0,600):'(无)';
     const msgs=(b.messages||[]).map((m,i)=>{let t='';if(typeof m.content==='string')t=m.content;else if(Array.isArray(m.content))t=m.content.map(x=>x.type==='text'?x.text:(x.type==='tool_use'?'[tool_use '+x.name+']':x.type==='tool_result'?'[tool_result]':'['+x.type+']')).join(' ');return '  ['+i+'] '+m.role+': '+String(t).slice(0,200)}).join('\n');
     const agentId=(r.headers&&r.headers['x-claude-code-agent-id'])||'(无 = 主循环)';
+    const cu=r.cache;
+    const fmtN=n=>Number.isFinite(Number(n))?Number(n).toLocaleString():'—';
+    const cacheLine=cu&&cu.cache_hit_rate!=null
+      ? ('输入 token   : 总 '+fmtN(cu.cache_total_tokens)+'，未缓存 '+fmtN(cu.input_tokens)+'，命中 '+fmtN(cu.cache_read_tokens)+'，写入 '+fmtN(cu.cache_creation_tokens)+'\n'+
+         '缓存命中率   : '+(Number(cu.cache_hit_rate)*100).toFixed(1)+'%')
+      : '缓存统计     : —（上游未返回 usage）';
     const text=
       'idx #'+r.idx+'   '+r.ts+'   '+r.path+'\n'+
       'CC 发出模型  : '+r.orig_model+'\n'+
@@ -1101,6 +1135,7 @@ async function fetchDetail(idx){
       '上游 / 规则  : '+r.route+'  /  '+r.route_reason+'\n'+
       '指纹清理     : '+(r.stripped_banner?('已删除 '+r.stripped_banner+' 块'):'未启用')+'\n'+
       '状态码       : '+r.resp_status+'\n'+
+      cacheLine+'\n'+
       '子代理 ID    : '+agentId+'\n'+
       '会话 ID      : '+((r.headers&&r.headers['X-Claude-Code-Session-Id'])||'-')+'\n'+
       '\n--- 请求 headers ---\n'+hd+'\n'+

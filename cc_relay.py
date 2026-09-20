@@ -813,6 +813,96 @@ def _resp_model(resp_body):
         return mm.group(1) if mm else None
 
 
+def _resp_cache_usage(resp_body):
+    """从普通 JSON 或 Anthropic SSE 响应提取 prompt-cache usage。"""
+    if not resp_body:
+        return None
+
+    merged = {}
+    saw_usage = False
+
+    def token_count(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def merge_usage(usage):
+        nonlocal saw_usage
+        if not isinstance(usage, dict):
+            return
+        fields = ("input_tokens", "cache_read_input_tokens",
+                  "cache_creation_input_tokens")
+        found = False
+        cache_found = False
+        for name in fields:
+            if name in usage:
+                value = token_count(usage.get(name))
+                if value is not None:
+                    merged[name] = value
+                    found = True
+                    cache_found = cache_found or name != "input_tokens"
+        # Some compatible providers expose cache breakdowns instead of a total.
+        if "cache_creation_input_tokens" not in merged:
+            breakdown = usage.get("cache_creation")
+            if isinstance(breakdown, dict):
+                parts = [token_count(breakdown.get(k)) or 0 for k in
+                         ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")]
+                if any(k in breakdown for k in ("ephemeral_5m_input_tokens",
+                                                "ephemeral_1h_input_tokens")):
+                    merged["cache_creation_input_tokens"] = sum(parts)
+                    found = True
+                    cache_found = True
+        # count_tokens responses often contain only input_tokens; they are not
+        # message cache diagnostics and should remain unavailable in the viewer.
+        saw_usage = saw_usage or cache_found or (found and "output_tokens" in usage)
+
+    def walk(value):
+        if isinstance(value, dict):
+            merge_usage(value.get("usage"))
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    text = str(resp_body)
+    try:
+        walk(json.loads(text))
+    except Exception:
+        pass
+    # SSE usage snapshots are cumulative; merge later fields over earlier ones.
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            walk(json.loads(payload))
+        except Exception:
+            pass
+    if not saw_usage:
+        return None
+
+    input_tokens = merged.get("input_tokens", 0)
+    cache_read = merged.get("cache_read_input_tokens", 0)
+    cache_creation = merged.get("cache_creation_input_tokens", 0)
+    total = input_tokens + cache_read + cache_creation
+    return {
+        "input_tokens": input_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+        "cache_total_tokens": total,
+        "cache_hit_rate": (cache_read / total) if total else None,
+    }
+
+
 def _iter_records_tail(max_records=400, max_bytes=16_000_000):
     """从文件末尾向前读, 拿够 max_records 条或到 max_bytes 为止(避免单条巨大导致读不到)"""
     if not os.path.exists(RECORDS):
@@ -848,7 +938,15 @@ def stats_snapshot():
         real_model = _resp_model(r.get('resp_body')) or r.get('sent_model') or r.get('orig_model')
         key = (r.get('route'), real_model)
         b = by.setdefault(key, {'route': r.get('route'), 'model': real_model,
-                                'sent': r.get('sent_model'), 'req': 0, 'ok': 0, 'err': 0, 'last': 0})
+                                'sent': r.get('sent_model'), 'req': 0, 'ok': 0, 'err': 0, 'last': 0,
+                                'input_tokens': 0, 'cache_read_tokens': 0,
+                                'cache_creation_tokens': 0, 'cache_requests': 0})
+        usage = _resp_cache_usage(r.get('resp_body'))
+        if usage:
+            b['input_tokens'] += usage.get('cache_total_tokens', 0) or 0
+            b['cache_read_tokens'] += usage.get('cache_read_tokens', 0) or 0
+            b['cache_creation_tokens'] += usage.get('cache_creation_tokens', 0) or 0
+            b['cache_requests'] += 1
         b['req'] += 1
         st = r.get('resp_status') or 0
         if st and st < 400:
@@ -856,6 +954,9 @@ def stats_snapshot():
         else:
             b['err'] += 1
         b['last'] = r.get('idx', 0)
+    for b in by.values():
+        total = b['input_tokens']
+        b['cache_hit_rate'] = (b['cache_read_tokens'] / total) if total else None
     rows = sorted(by.values(), key=lambda x: -x['last'])
     conf = load_conf()
     rt = conf.get('router') or {}
@@ -1211,6 +1312,7 @@ class UIHandler(BaseHTTPRequestHandler):
         for r in recs:
             b = r.get("body") or {}
             h = {k.lower(): v for k, v in (r.get("headers") or {}).items()}
+            cache = _resp_cache_usage(r.get("resp_body"))
             out.append({
                 "idx": r.get("idx"),
                 "ts": r.get("ts"),
@@ -1225,6 +1327,7 @@ class UIHandler(BaseHTTPRequestHandler):
                 "msgs": len(b.get("messages") or []),
                 "tools": len(b.get("tools") or []),
                 "stream": b.get("stream"),
+                "cache": cache,
             })
         return {"calls": out, "total": len(out)}
 
@@ -1237,7 +1340,9 @@ class UIHandler(BaseHTTPRequestHandler):
             return {"error": "missing idx"}
         for r in _iter_records_tail(max_records=500, max_bytes=20_000_000):
             if str(r.get("idx")) == str(idx):
-                return r
+                out = dict(r)
+                out["cache"] = _resp_cache_usage(r.get("resp_body"))
+                return out
         return {"error": "not found"}
 
     def do_GET(self):
