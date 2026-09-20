@@ -44,7 +44,8 @@
       "sonnet": false,
       "fast": true,
       "agent": false
-    }
+    },
+    "modifier_mode": "custom"
   },
   "ui_port": 8610
 }

@@ -300,7 +300,45 @@ claude
 
 ---
 
-## 9. 卸载 / 关掉自启动
+## 9. 在桌面图形客户端（Claude Desktop / GUI）中使用
+
+如果你使用的是带有图形界面的桌面客户端（例如 **Claude Desktop** 或 IDE 插件），直接双击桌面图标可能无法生效，原因有两点：
+1. **Windows 环境变量继承机制**：`setx` 写入注册表后，开机就已运行的桌面外壳（`explorer.exe`）不会自动热更新环境变量，双击启动的程序继承不到。
+2. **中转自启动依赖**：原版的自启动只写在 CLI 的 `wrapper\claude.cmd` 里，双击 GUI 客户端不会触发终端 wrapper，导致后台 8400 端口的中转没启动。
+
+### 推荐解决方式（任选其一）
+
+#### 方式 A：双击专用的桌面启动器（最方便，零配置）
+直接双击项目根目录下的 **`start_desktop.bat`**：
+- 脚本会自动静默拉起后台中转（8400）与 UI（8610）
+- 为图形客户端临时注入完整的 `ANTHROPIC_*` 代理环境变量
+- 自动拉起已安装的 Claude 桌面客户端
+
+#### 方式 B：配置 Claude 统一设置文件（一劳永逸）
+在你的用户目录打开或创建：`%USERPROFILE%\.claude\settings.json`（即 `C:\Users\<你>\.claude\settings.json`），在其中加入 `"env"` 块：
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8400",
+    "ANTHROPIC_AUTH_TOKEN": "sk-relay-local-0000",
+    "ANTHROPIC_MODEL": "relay-main[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "OPUS_MODEL[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "SONNET_MODEL[1m]",
+    "ANTHROPIC_SMALL_FAST_MODEL": "FAST_MODEL[1m]"
+  }
+}
+```
+> 所有由 Claude 驱动的桌面版、Code 引擎及 IDE 插件（VS Code、JetBrains）都会直接读取该文件中的环境变量，彻底避开 Windows 环境变量继承问题。使用前只需确保中转服务在跑（`python lifecycle.py autostart`）。
+
+#### 方式 C：官方 Claude Desktop 聊天端配置第三方推理
+如果使用的是 Anthropic 官方的 Claude Desktop 客户端：
+- 点击顶部菜单栏：**Developer（开发者）** → **Configure Third-Party Inference...（配置第三方推理）**
+- **Base URL**：填入 `http://127.0.0.1:8400`
+- **API Key**：填入 `sk-relay-local-0000`
+
+---
+
+## 10. 卸载 / 关掉自启动
 
 1. 删掉 `C:\Users\<你>\bin\claude.cmd`（或把该目录从 PATH 里移除）
 2. 删掉第 6 节那几个 `ANTHROPIC_*` 环境变量（`setx ANTHROPIC_MODEL ""` 之类，或图形界面删）
@@ -309,7 +347,7 @@ claude
 
 ---
 
-## 10. 故障排查
+## 11. 故障排查
 
 | 现象 | 原因 / 处理 |
 |---|---|

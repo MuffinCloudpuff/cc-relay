@@ -349,6 +349,186 @@ def _strip_cc_fingerprint(body):
     return nb, removed
 
 
+# ---------- 自定义请求修改器 (热重载与安全加载) ----------
+MODIFIER_FILE = os.path.join(BASE, "custom_modifier.py")
+
+
+class ModifierManager:
+    """管理 custom_modifier.py 的热重载与安全调用"""
+    def __init__(self):
+        self._mod = None
+        self._mtime = 0.0
+        self._err = None
+
+    def get_modifier(self):
+        """检查 custom_modifier.py 修改时间，有变更时自动热重载"""
+        try:
+            if not os.path.exists(MODIFIER_FILE):
+                return None
+            mtime = os.path.getmtime(MODIFIER_FILE)
+            if mtime != self._mtime or self._mod is None:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("custom_modifier", MODIFIER_FILE)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    self._mod = mod
+                    self._mtime = mtime
+                    self._err = None
+        except Exception as e:
+            self._err = repr(e)
+            print(f"[WARN] 加载 custom_modifier.py 失败: {e}", file=sys.stderr)
+        return self._mod
+
+
+_MOD_MGR = ModifierManager()
+
+
+# ---------- 各档位 System 提示词管理 (复用运行时抓包 + 在线编辑) ----------
+PROMPTS_FILE = os.path.join(BASE, "prompts.json")
+PROMPTS_LOCK = threading.Lock()
+
+
+class PromptManager:
+    """管理各档位 System 提示词的抓包捕获、在线编辑与请求体替换"""
+    def __init__(self):
+        self._data = {
+            "captured": {k: "" for k in TIER_KEYS},
+            "custom": {k: "" for k in TIER_KEYS},
+            "enabled": {k: False for k in TIER_KEYS},
+        }
+        self.load()
+
+    def load(self):
+        with PROMPTS_LOCK:
+            if os.path.exists(PROMPTS_FILE):
+                try:
+                    with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                        for section in ("captured", "custom", "enabled"):
+                            if isinstance(d.get(section), dict):
+                                self._data[section].update(d[section])
+                except Exception:
+                    pass
+            else:
+                self._preseed_from_records()
+
+    def _preseed_from_records(self):
+        """若无 prompts.json, 自动从历史 records.jsonl 提取各档位捕获的原始 system 提示词"""
+        if not os.path.exists(RECORDS):
+            return
+        try:
+            with open(RECORDS, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                        reason = r.get("route_reason") or ""
+                        tier = reason.replace("hybrid:", "") if reason.startswith("hybrid:") else None
+                        if tier not in TIER_KEYS:
+                            continue
+                        b = r.get("body") or {}
+                        sys = b.get("system")
+                        if sys and not self._data["captured"][tier]:
+                            if isinstance(sys, list):
+                                txt = "\n\n".join(blk.get("text", "") for blk in sys if isinstance(blk, dict) and blk.get("text"))
+                            else:
+                                txt = str(sys)
+                            self._data["captured"][tier] = txt
+                    except Exception:
+                        pass
+            self.save()
+        except Exception:
+            pass
+
+    def save(self):
+        with PROMPTS_LOCK:
+            tmp = PROMPTS_FILE + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self._data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, PROMPTS_FILE)
+            except Exception:
+                pass
+
+    def get_data(self):
+        with PROMPTS_LOCK:
+            return {
+                "captured": dict(self._data["captured"]),
+                "custom": dict(self._data["custom"]),
+                "enabled": dict(self._data["enabled"]),
+                "counts": {
+                    k: {
+                        "captured_len": len(self._data["captured"].get(k, "")),
+                        "custom_len": len(self._data["custom"].get(k, "")),
+                        "enabled": bool(self._data["enabled"].get(k, False)),
+                    }
+                    for k in TIER_KEYS
+                }
+            }
+
+    def update_tier(self, tier, custom_text=None, enabled=None):
+        if tier not in TIER_KEYS:
+            return False
+        with PROMPTS_LOCK:
+            if custom_text is not None:
+                self._data["custom"][tier] = str(custom_text)
+            if enabled is not None:
+                self._data["enabled"][tier] = bool(enabled)
+        self.save()
+        return True
+
+    def capture(self, tier, body_json):
+        """运行时抓包: 记录进入中转的原版 system 提示词"""
+        if tier not in TIER_KEYS or not isinstance(body_json, dict):
+            return
+        sys = body_json.get("system")
+        if not sys:
+            return
+        if isinstance(sys, list):
+            txt = "\n\n".join(blk.get("text", "") for blk in sys if isinstance(blk, dict) and blk.get("text"))
+        else:
+            txt = str(sys)
+        txt = txt.strip()
+        if not txt:
+            return
+        if self._data["captured"].get(tier) != txt:
+            with PROMPTS_LOCK:
+                self._data["captured"][tier] = txt
+            self.save()
+
+    def apply_custom(self, tier, body_json):
+        """若开启了自定义提示词，将修改后的提示词注入/替换到 body_json 中，并保留 cache_control"""
+        if tier not in TIER_KEYS or not isinstance(body_json, dict):
+            return body_json, False
+        if not self._data["enabled"].get(tier):
+            return body_json, False
+        custom_txt = (self._data["custom"].get(tier) or "").strip()
+        if not custom_txt:
+            return body_json, False
+
+        orig_sys = body_json.get("system")
+        nb = dict(body_json)
+        if isinstance(orig_sys, list) and orig_sys:
+            cc = None
+            for blk in orig_sys:
+                if isinstance(blk, dict) and blk.get("cache_control"):
+                    cc = blk["cache_control"]
+                    break
+            new_blk = {"type": "text", "text": custom_txt}
+            if cc:
+                new_blk["cache_control"] = cc
+            nb["system"] = [new_blk]
+        else:
+            nb["system"] = custom_txt
+        return nb, True
+
+
+_PROMPT_MGR = PromptManager()
+
+
 def pick_route(conf, method, path, headers, body_json, body_raw):
     """统一路由: 返回 (upstream_name, map_model|None, reason)
     router.route = "hybrid" | "codex" | "deepseek"
@@ -514,6 +694,9 @@ def stats_snapshot():
             'effort': (rt.get('effort') or 'medium'),
             # 各档指纹清理开关(五张档位卡右上角)
             'strip_cc_banner': _strip_flags(rt),
+            'modifier_mode': (rt.get('modifier_mode') or conf.get('modifier_mode') or 'custom').strip().lower(),
+            'modifier_file_exists': os.path.exists(MODIFIER_FILE),
+            'modifier_error': _MOD_MGR._err,
             'tier_efforts': {
                 'main':   ((rt.get('tier_efforts') or {}).get('main')   or rt.get('effort') or 'medium'),
                 'opus':   ((rt.get('tier_efforts') or {}).get('opus')   or rt.get('effort') or 'medium'),
@@ -602,15 +785,18 @@ class Relay(BaseHTTPRequestHandler):
             body_json["thinking"] = REASONING_MAP[effort]
             raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
-        # CC 指纹清理(各档卡右上角开关): 删 system 里的身份句 + billing 头
-        stripped_n = 0
-        if (tier_hit and _strip_flags(router_cfg)[tier_hit]
-                and isinstance(body_json, dict)):
-            body_json, stripped_n = _strip_cc_fingerprint(body_json)
-            if stripped_n:
+        # 1. 运行时抓包: 记录进入中转的原版 system 提示词
+        if tier_hit and isinstance(body_json, dict):
+            _PROMPT_MGR.capture(tier_hit, body_json)
+
+        # 2. 若当前档位开启了在线自定义提示词，用前端配置的内容替换 (并保留 prompt-cache)
+        custom_prompt_applied = False
+        if tier_hit and isinstance(body_json, dict):
+            body_json, custom_prompt_applied = _PROMPT_MGR.apply_custom(tier_hit, body_json)
+            if custom_prompt_applied:
                 raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
 
-        # headers
+        # 请求头基础过滤与鉴权注入
         fwd = {}
         for k, v in self.headers.items():
             lk = k.lower()
@@ -622,6 +808,72 @@ class Relay(BaseHTTPRequestHandler):
             fwd["x-api-key"] = key
             fwd["authorization"] = "Bearer " + key
         fwd["Accept-Encoding"] = "identity"
+
+        # 请求修改与指纹处理 (支持 custom / builtin / original 三种模式)
+        mod_mode = (router_cfg.get("modifier_mode") or conf.get("modifier_mode") or "custom").strip().lower()
+        tier_strip_on = bool(tier_hit and _strip_flags(router_cfg).get(tier_hit, False))
+        stripped_n = 0
+
+        # 构建上下文供修改器使用
+        mod_ctx = {
+            "upstream_name": up_name,
+            "tier": tier_hit,
+            "orig_model": orig_model,
+            "target_model": sent_model,
+            "path": path,
+            "method": method,
+            "is_subagent": _is_subagent(self.headers, body_json),
+            "tier_strip_on": tier_strip_on,
+            "modifier_mode": mod_mode,
+        }
+
+        if mod_mode == "original":
+            # 【原版模式】: 不对 body 和 headers 进行任何修改或指纹过滤
+            stripped_n = 0
+        elif mod_mode == "builtin":
+            # 【内置清理模式】: 原作者的 _strip_cc_fingerprint 逻辑
+            if tier_strip_on and isinstance(body_json, dict):
+                body_json, stripped_n = _strip_cc_fingerprint(body_json)
+                if stripped_n:
+                    raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+        else:
+            # 【自定义模式】(默认): 从 custom_modifier.py 热重载执行
+            mod = _MOD_MGR.get_modifier()
+            if mod:
+                # 1. 执行自定义请求体修改
+                try:
+                    if hasattr(mod, "modify_body"):
+                        nb_json, nb_raw, sn = mod.modify_body(body_json, raw, mod_ctx)
+                        if nb_raw is not None:
+                            raw = nb_raw
+                            if nb_json is not None:
+                                body_json = nb_json
+                        elif nb_json is not None:
+                            body_json = nb_json
+                            raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+                        stripped_n = int(sn or 0)
+                except Exception as e:
+                    print(f"[WARN] custom_modifier.modify_body 执行失败: {e}", file=sys.stderr)
+                    if tier_strip_on and isinstance(body_json, dict):
+                        body_json, stripped_n = _strip_cc_fingerprint(body_json)
+                        if stripped_n:
+                            raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
+                # 2. 执行自定义请求头修改
+                try:
+                    if hasattr(mod, "modify_headers"):
+                        new_fwd = mod.modify_headers(fwd, mod_ctx)
+                        if isinstance(new_fwd, dict):
+                            fwd = new_fwd
+                except Exception as e:
+                    print(f"[WARN] custom_modifier.modify_headers 执行失败: {e}", file=sys.stderr)
+            else:
+                # 若无自定义文件或加载失败，安全回退到内置规则
+                if tier_strip_on and isinstance(body_json, dict):
+                    body_json, stripped_n = _strip_cc_fingerprint(body_json)
+                    if stripped_n:
+                        raw = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
         data = raw if raw else None
 
         # 转发
@@ -660,6 +912,7 @@ class Relay(BaseHTTPRequestHandler):
                 "route": up_name, "route_reason": reason,
                 "orig_model": orig_model, "sent_model": sent_model,
                 "stripped_banner": stripped_n,
+                "custom_prompt": custom_prompt_applied,
                 "upstream": upstream, "resp_status": status,
                 "resp_body": rbody.decode("utf-8", "replace")[:conf.get("max_body_capture", 2000000)],
                 "resp_error": err,
@@ -743,6 +996,8 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/status"):
             self._json(stats_snapshot())
+        elif self.path.startswith("/api/prompts"):
+            self._json(_PROMPT_MGR.get_data())
         elif self.path.startswith("/api/calls"):
             self._json(self._calls())
         elif self.path.startswith("/api/call"):
@@ -794,6 +1049,11 @@ class UIHandler(BaseHTTPRequestHandler):
                         self._json({"error": "strip_cc_banner must be boolean or object"}, 400)
                         return
                     rt["strip_cc_banner"] = cur
+                # 修改器模式: custom (默认自定义脚本) | builtin (内置清理) | original (原版纯透传)
+                if "modifier_mode" in data:
+                    m = str(data["modifier_mode"]).strip().lower()
+                    if m in ("custom", "builtin", "original"):
+                        rt["modifier_mode"] = m
                 # 推理强度 effort 为全局设置, 任何路由下都可修改 (档位见 EFFORT_VALUES)
                 if data.get("effort") is not None:
                     v = str(data.get("effort") or "").strip()
@@ -855,6 +1115,15 @@ class UIHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._json({"ok": True})
+        elif p == "/api/prompts":
+            tier = data.get("tier")
+            custom_txt = data.get("custom")
+            enabled = data.get("enabled")
+            if tier in TIER_KEYS:
+                _PROMPT_MGR.update_tier(tier, custom_text=custom_txt, enabled=enabled)
+                self._json({"ok": True, "tier": tier})
+            else:
+                self._json({"error": "invalid tier"}, 400)
         else:
             self._json({"error": "not found"}, 404)
 

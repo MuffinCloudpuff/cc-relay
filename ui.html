@@ -220,6 +220,38 @@
   .toast.err{background:#b62324}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
+  /* ── 提示词在线编辑区 ── */
+  .pm-tabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:12px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  .pm-tab{background:#161e2b;border:1px solid var(--line);color:var(--dim);padding:7px 14px;border-radius:8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:.15s}
+  .pm-tab em{font-style:normal;color:var(--faint);font-size:11px}
+  .pm-tab:hover{background:#1f2937;color:var(--fg)}
+  .pm-tab.active{background:#238636;color:#fff;border-color:#2ea043}
+  .pm-tab.active em{color:rgba(255,255,255,.8)}
+  .pm-tag{font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(255,255,255,.15);color:#fff}
+  .pm-panel{background:#0d1117;border:1px solid var(--line);border-radius:10px;padding:14px}
+  .pm-bar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+  .pm-bar-l{display:flex;align-items:center;gap:12px}
+  .pm-bar-r{display:flex;align-items:center;gap:8px}
+  .pm-check-label{display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-size:12.5px;color:var(--fg);font-weight:600}
+  .pm-check-label input{cursor:pointer;width:16px;height:16px;accent-color:#238636}
+  .pm-status-badge{font-size:11px;color:var(--dim);background:#161e2b;padding:3px 8px;border-radius:6px;border:1px solid var(--line)}
+  .pm-act-btn{background:#21262d;border:1px solid var(--line);color:var(--fg);padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer;transition:.15s}
+  .pm-act-btn:hover{background:#30363d}
+  .pm-act-btn.primary{background:#238636;border-color:#2ea043;color:#fff;font-weight:600}
+  .pm-act-btn.primary:hover{background:#2ea043}
+  .pm-act-btn.danger{color:#f85149;border-color:rgba(248,81,73,.3)}
+  .pm-act-btn.danger:hover{background:rgba(248,81,73,.15)}
+  .pm-box-wrap{position:relative}
+  #pm-editor{width:100%;height:320px;background:#010409;color:#e6edf3;border:1px solid var(--line);border-radius:8px;padding:12px;font-family:var(--mono);font-size:12px;line-height:1.6;resize:vertical;outline:none;box-sizing:border-box}
+  #pm-editor:focus{border-color:#58a6ff}
+  .pm-info-bar{display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11.5px;color:var(--faint)}
+  .pm-cnt{font-family:var(--mono);color:var(--dim)}
+  .pm-orig-drawer{margin-top:12px;background:#05070a;border:1px dashed #30363d;border-radius:8px;padding:12px}
+  .pm-orig-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:600;color:var(--dim);margin-bottom:8px}
+  .pm-orig-head button{background:transparent;border:none;color:var(--faint);cursor:pointer;font-size:12px}
+  .pm-orig-head button:hover{color:var(--fg)}
+  #pm-orig-content{margin:0;max-height:220px;overflow:auto;font-family:var(--mono);font-size:11.5px;color:var(--faint);white-space:pre-wrap;word-break:break-all;line-height:1.55}
+
   @media(max-width:1050px){ .hb-grid{grid-template-columns:repeat(3,minmax(0,1fr))} }
   @media(max-width:880px){ .row2{grid-template-columns:1fr} }
   @media(max-width:760px){ .hb-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
@@ -236,6 +268,7 @@
     </div>
     <div class="badges">
       <div class="badge" id="bd-route"><span class="dot" id="routedot"></span>路由 <b id="routetxt">…</b></div>
+      <div class="badge" id="bd-modifier" style="cursor:pointer" title="点击切换修改器模式: 自定义脚本 / 内置清理 / 原版纯透传"><span class="dot" id="moddot"></span>修改器 <b id="modtxt">…</b></div>
       <div class="badge"><span class="dot" id="pdot"></span>代理 <b id="ptxt2">检查…</b></div>
     </div>
   </header>
@@ -422,6 +455,62 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 各档位 System 提示词实时编辑与抓包查看 -->
+  <div class="card" id="c-prompts" style="margin-bottom:14px;border-color:var(--line);">
+    <div class="hb-head" style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--line);">
+      <div class="cicon" style="background:#238636;color:#fff;">🎯</div>
+      <div class="hb-title">
+        <div class="cname">各档位 System 提示词实时编辑与抓包查看</div>
+        <div class="cdesc">复用运行时抓包捕获的原版提示词 · 在线直接编辑 · 随时一键还原原版 · 自动保存即改即生效</div>
+      </div>
+    </div>
+
+    <!-- 5 档 Tab 切换栏 -->
+    <div class="pm-tabs">
+      <button type="button" class="pm-tab active" data-ptier="main">主模型 <em>main</em><span class="pm-tag" id="ptag-main">原版</span></button>
+      <button type="button" class="pm-tab" data-ptier="opus">explore代理 <em>opus</em><span class="pm-tag" id="ptag-opus">原版</span></button>
+      <button type="button" class="pm-tab" data-ptier="sonnet">审查代理 <em>sonnet</em><span class="pm-tag" id="ptag-sonnet">原版</span></button>
+      <button type="button" class="pm-tab" data-ptier="fast">任务名称代理 <em>fast</em><span class="pm-tag" id="ptag-fast">原版</span></button>
+      <button type="button" class="pm-tab" data-ptier="agent">plan代理 <em>agent</em><span class="pm-tag" id="ptag-agent">待抓包</span></button>
+    </div>
+
+    <!-- 提示词编辑操作栏与文本框 -->
+    <div class="pm-panel">
+      <div class="pm-bar">
+        <div class="pm-bar-l">
+          <label class="pm-check-label">
+            <input type="checkbox" id="pm-enable-sw">
+            <span class="pm-check-text">启用本档自定义提示词（开启后替换原版发往上游）</span>
+          </label>
+          <span class="pm-status-badge" id="pm-stat-badge">🟢 已捕获原版</span>
+        </div>
+        <div class="pm-bar-r">
+          <button type="button" class="pm-act-btn" id="pm-btn-view" title="查看当前档位抓包捕获到的原始未经改动的提示词">👁️ 查看原版抓包</button>
+          <button type="button" class="pm-act-btn danger" id="pm-btn-reset" title="将编辑框内容一键重置为抓包捕获的原版提示词">↺ 还原为原版提示词</button>
+          <button type="button" class="pm-act-btn primary" id="pm-btn-save">💾 保存生效</button>
+        </div>
+      </div>
+
+      <div class="pm-box-wrap">
+        <textarea id="pm-editor" spellcheck="false" placeholder="正在加载提示词..."></textarea>
+      </div>
+
+      <div class="pm-info-bar">
+        <span id="pm-char-cnt" class="pm-cnt">0 字符</span>
+        <span class="pm-tip">💡 提示：支持直接在此对照原版修改 · Ctrl+S 快速保存 · 开启后发往上游自动替换 system 且保留 prompt-cache 断点</span>
+      </div>
+
+      <!-- 原版对比折叠抽屉 -->
+      <div id="pm-orig-view" class="pm-orig-drawer" style="display:none;">
+        <div class="pm-orig-head">
+          <span>📦 运行时抓包捕获的原始 System 提示词 (只读)</span>
+          <button type="button" id="pm-orig-close">关闭</button>
+        </div>
+        <pre id="pm-orig-content"></pre>
       </div>
     </div>
   </div>
@@ -651,9 +740,27 @@ async function refresh(){
   const rt={'hybrid':'混合 · '+((tiers.main||'DS'))+' / '+(tiers.opus||'Sol'),'deepseek':'DeepSeek 直连 · '+(saved||'默认'),'codex':'Codex 全量 · '+(saved||'gpt-5.6-sol')}[route]||route;
   $('#routetxt').textContent=rt;
   $('#routedot').className='dot on';
+
+  const mm=st.modifier_mode||'custom';
+  const mmLabels={'custom':'自定义脚本','builtin':'内置清理','original':'原版纯透传'};
+  $('#moddot').className='dot on';
+  $('#modtxt').textContent=mmLabels[mm]||mm;
+
   $('#cur').innerHTML='Base: <b>http://127.0.0.1:8400</b> ｜ 上游: DeepSeek + Codex(8317) ｜ 假 key: <b>sk-relay-local-0000</b>';
 }
 const TIER_NAME={main:'主',opus:'explore代理',sonnet:'审查代理',fast:'任务名称代理',agent:'plan代理'};
+$('#bd-modifier').onclick=async()=>{
+  const modes=['custom','builtin','original'];
+  const cur=(st&&st.modifier_mode)||'custom';
+  const nxt=modes[(modes.indexOf(cur)+1)%modes.length];
+  try{
+    const r=await api('/api/route',{route:(st&&st.route)||'hybrid',modifier_mode:nxt});
+    if(r.error)throw new Error(r.error);
+    const mmLabels={'custom':'自定义脚本 (custom_modifier.py)','builtin':'内置清理','original':'原版纯透传'};
+    toast('修改器模式已切为: '+(mmLabels[nxt]||nxt));
+    await refresh();
+  }catch(err){toast('切换失败: '+err,true)}
+};
 async function doSwitch(route,btnId,model){
   if(busy)return;busy=true;
   const btn=$(btnId);const old=btn.textContent;btn.disabled=true;btn.textContent='切换中…';
@@ -800,7 +907,130 @@ async function toggleDetail(idx){
 }
 $('#b-crefresh').onclick=()=>loadCalls(true);
 
-refresh();setInterval(refresh,4000);loadTraffic();setInterval(loadTraffic,3000);loadCalls();setInterval(loadCalls,5000);
+// ── 提示词管理交互逻辑 ──
+let _pmData={captured:{},custom:{},enabled:{}};
+let _curPtier='main';
+
+async function loadPromptsData(){
+  try{
+    const res=await api('/api/prompts');
+    if(res&&res.captured){
+      _pmData=res;
+      renderPromptsUI();
+    }
+  }catch(e){}
+}
+
+function renderPromptsUI(){
+  const tiers=['main','opus','sonnet','fast','agent'];
+  tiers.forEach(t=>{
+    const badge=$('#ptag-'+t);
+    if(!badge)return;
+    const isEn=!!(_pmData.enabled&&_pmData.enabled[t]);
+    const hasCap=!!(_pmData.captured&&_pmData.captured[t]&&_pmData.captured[t].trim());
+    if(isEn){
+      badge.textContent='已自定义';
+      badge.style.background='#238636';
+    }else if(hasCap){
+      badge.textContent='原版';
+      badge.style.background='rgba(255,255,255,.15)';
+    }else{
+      badge.textContent='待抓包';
+      badge.style.background='rgba(255,255,255,.08)';
+    }
+  });
+
+  const cap=(_pmData.captured&&_pmData.captured[_curPtier])||'';
+  const cust=(_pmData.custom&&_pmData.custom[_curPtier])||'';
+  const isEnabled=!!(_pmData.enabled&&_pmData.enabled[_curPtier]);
+
+  $('#pm-enable-sw').checked=isEnabled;
+  const statBadge=$('#pm-stat-badge');
+  if(cap){
+    statBadge.textContent='🟢 已抓包原版 ('+cap.length+' 字符)';
+    statBadge.style.color='var(--hb)';
+  }else{
+    statBadge.textContent='⚪ 尚未抓包到本档请求';
+    statBadge.style.color='var(--faint)';
+  }
+
+  const editor=$('#pm-editor');
+  if(document.activeElement!==editor){
+    editor.value=cust?cust:cap;
+    updateCharCount();
+  }
+}
+
+function updateCharCount(){
+  const v=$('#pm-editor').value||'';
+  $('#pm-char-cnt').textContent=v.length+' 字符 (约 '+Math.round(v.length/3.5)+' tokens)';
+}
+
+$('#pm-editor').addEventListener('input',updateCharCount);
+
+document.querySelectorAll('.pm-tab').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.pm-tab').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    _curPtier=btn.dataset.ptier;
+    $('#pm-orig-view').style.display='none';
+    renderPromptsUI();
+  });
+});
+
+$('#pm-enable-sw').addEventListener('change',async()=>{
+  const en=$('#pm-enable-sw').checked;
+  const val=$('#pm-editor').value;
+  await savePrompt(_curPtier,val,en);
+});
+
+$('#pm-btn-save').addEventListener('click',async()=>{
+  const en=$('#pm-enable-sw').checked;
+  const val=$('#pm-editor').value;
+  await savePrompt(_curPtier,val,en);
+});
+
+$('#pm-editor').addEventListener('keydown',async(e)=>{
+  if((e.ctrlKey||e.metaKey)&&e.key==='s'){
+    e.preventDefault();
+    const en=$('#pm-enable-sw').checked;
+    const val=$('#pm-editor').value;
+    await savePrompt(_curPtier,val,en);
+  }
+});
+
+async function savePrompt(tier,custom,enabled){
+  try{
+    const r=await api('/api/prompts',{tier,custom,enabled});
+    if(r.error)throw new Error(r.error);
+    toast((TIER_NAME[tier]||tier)+'档提示词已保存'+(enabled?' (已生效)':''));
+    await loadPromptsData();
+  }catch(e){
+    toast('保存失败: '+e,true);
+  }
+}
+
+$('#pm-btn-reset').addEventListener('click',()=>{
+  const cap=(_pmData.captured&&_pmData.captured[_curPtier])||'';
+  if(!cap){
+    toast('该档位尚未捕获到原版提示词',true);
+    return;
+  }
+  $('#pm-editor').value=cap;
+  updateCharCount();
+  toast('已载入原版抓包提示词，点击保存即可生效');
+});
+
+$('#pm-btn-view').addEventListener('click',()=>{
+  const cap=(_pmData.captured&&_pmData.captured[_curPtier])||'(暂未捕获到本档位请求)';
+  $('#pm-orig-content').textContent=cap;
+  $('#pm-orig-view').style.display=$('#pm-orig-view').style.display==='none'?'block':'none';
+});
+$('#pm-orig-close').addEventListener('click',()=>{
+  $('#pm-orig-view').style.display='none';
+});
+
+refresh();setInterval(refresh,4000);loadTraffic();setInterval(loadTraffic,3000);loadCalls();setInterval(loadCalls,5000);loadPromptsData();setInterval(loadPromptsData,6000);
 </script>
 </body>
 </html>
