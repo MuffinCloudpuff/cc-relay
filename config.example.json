@@ -34,15 +34,17 @@
   },
   "router": {
     "route": "hybrid",
+    "hybrid_codex_model": "gpt-5.6-sol",
+    "hybrid_deepseek_model": "deepseek-flash",
     "hybrid_antigravity_model": "gemini-3.7-flash-low",
+    "effort": "high",
     "tiers": {
-      "main": "deepseek-flash",
+      "main": "gemini-3.7-flash-medium",
       "opus": "deepseek-flash",
       "sonnet": "gpt-5.6-luna",
-      "fast": "gpt-5.6-luna",
-      "agent": "gpt-5.6-sol"
+      "fast": "gemini-3.5-flash-low",
+      "agent": "gpt-5.6-terra"
     },
-    "effort": "medium",
     "tier_efforts": {
       "main": "medium",
       "opus": "medium",
@@ -51,13 +53,20 @@
       "agent": "medium"
     },
     "strip_cc_banner": {
-      "main": true,
+      "main": false,
       "opus": false,
       "sonnet": false,
-      "fast": true,
+      "fast": false,
       "agent": false
     },
-    "modifier_mode": "custom"
+    "modifier_mode": "custom",
+    "tier_modifier": {
+      "main": "builtin",
+      "fast": "builtin",
+      "opus": "original",
+      "agent": "original",
+      "sonnet": "original"
+    }
   },
   "ui_port": 8610
 }
