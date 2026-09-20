@@ -960,7 +960,7 @@ async function refresh(){
     });
     box.disabled=!hb;
   });
-  const gmm=(st.gemini_modifier||'original');
+  const gmm=(st.gemini_modifier||'builtin');
   document.querySelectorAll('#gm-mod .tmod-btn').forEach(b=>b.classList.toggle('sel-'+b.dataset.m,b.dataset.m===gmm));
   const run=!!st.proxy_running,grun=!!(st.antigravity_up||(st.upstreams_status||{}).gemini?.available);
   $('#pdot').className='dot'+(run?' on':'');$('#pdot2').className='dot'+(run?' on':'');
@@ -971,7 +971,7 @@ async function refresh(){
   $('#routetxt').textContent=rt;
   $('#routedot').className='dot on';
 
-  $('#cur').innerHTML='Base: <b>本机中转</b> ｜ 上游 URL / key 请在「连接配置」中管理';
+  $('#cur').innerHTML='Base: <b>http://127.0.0.1:8400</b> ｜ 上游: DeepSeek + Codex(8317) ｜ 假 key: <b>sk-relay-local-0000</b>';
 }
 const TIER_NAME={main:'主',opus:'explore代理',sonnet:'审查代理',fast:'任务名称代理',agent:'plan代理'};
 async function doSwitch(route,btnId,model){

@@ -1052,7 +1052,7 @@ class Relay(BaseHTTPRequestHandler):
             per_tier_explicit = True
         elif up_name == "antigravity":
             _gm = str(router_cfg.get("gemini_modifier") or "").strip().lower()
-            eff_mode = _gm if _gm in ("original", "builtin") else "original"
+            eff_mode = _gm if _gm in ("original", "builtin") else "builtin"
             per_tier_explicit = True
         stripped_n = 0
 
