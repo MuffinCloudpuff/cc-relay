@@ -25,7 +25,7 @@
 
 ## 🚀 核心特性
 
-- ⚡ **零第三方依赖 (Zero Dependencies)**：纯 Python 3.8+ 标准库编写，无需 `pip install` 任何第三方包，克隆即可秒级启动。
+- ⚡ **核心中转零第三方依赖 (Zero Dependencies)**：根目录 `cc_relay.py` 与 `manager_control.py` 均由纯 Python 3.8+ 标准库编写，无需 `pip install` 任何第三方包，克隆即可秒级启动（可选扩展 `manager-core/` 拥有完全隔离的独立运行时）。
 - 🔀 **3 大主流上游汇聚**：
   - **DeepSeek**：官方 Anthropic 兼容端点直连，极致性价比。
   - **Codex (CLIProxyAPI)**：桥接官方 GPT 模型（GPT-5.6 / GPT-6 等），支持 Reasoning Effort 预算转换。
@@ -269,7 +269,16 @@ Web 控制台基于以下标准 JSON 接口通信，亦可用于第三方自动�
 
 ---
 
-## 📄 开源许可证
+## 🧩 可选扩展：Manager Core (无头后台)
 
-本项目基于 [MIT License](LICENSE) 开源发布。
-项目中涉及的第三方桥接工具（如 `CLIProxyAPI`）遵循其各自独立的开源协议与版权声明。
+- `manager-core/` 是可选的无头 AntigravityManager 后端封装，可在本地无图形托盘常驻运行多账号调度与额度统计。
+- **依赖隔离**：该子系统包含独立的 Node.js / Electron 依赖，仅在需要本地托管并手动进入 `manager-core/` 部署时才需构建，主中转服务 `python cc_relay.py serve` **绝不依赖** 也不会强制构建它。
+- **运维辅助脚本安全**：`manager-core/tools/deploy-local.py` 是面向操作员的手动本地数据迁移工具，**绝不会被主程序、测试流程或生命周期看门狗自动执行**。
+
+---
+
+## 📄 开源许可证与协议说明
+
+- **根项目代码 (`cc-relay`)**：基于 [MIT License](LICENSE) 开源发布。纯 Python 标准库实现，商业与非商业均可自由使用。
+- **可选子系统 (`manager-core/`)**：基于 Draculabo/AntigravityManager (v0.20.0) 派生与适配，遵循 [CC-BY-NC-SA-4.0](manager-core/LICENSE) 协议（包含署名、相同方式共享及**非商业用途限制**）。详见 [manager-core/NOTICE.md](manager-core/NOTICE.md)。
+- 项目中涉及的其他第三方桥接工具（如 `CLIProxyAPI`）遵循其各自独立的开源协议与版权声明。

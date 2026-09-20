@@ -25,7 +25,7 @@ Through one unified endpoint it aggregates and dispatches to three upstreams —
 
 ## 🚀 Core Features
 
-- ⚡ **Zero third-party dependencies**: written entirely against the Python 3.8+ standard library. No `pip install` needed — clone it and it starts in seconds.
+- ⚡ **Zero third-party dependencies for root relay**: root `cc_relay.py` and `manager_control.py` are written entirely against the Python 3.8+ standard library. No `pip install` needed — clone it and it starts in seconds (optional `manager-core/` has an isolated runtime).
 - 🔀 **Three first-class upstreams**:
   - **DeepSeek** — direct connection to the official Anthropic-compatible endpoint, best cost/performance.
   - **Codex (CLIProxyAPI)** — bridges official GPT models (GPT-5.6 / GPT-6 and friends) with Reasoning Effort budget translation.
@@ -266,7 +266,16 @@ The web console talks to the relay over these plain JSON endpoints, which are eq
 
 ---
 
-## 📄 License
+## 🧩 Optional Subsystem: Manager Core (Headless Backend)
 
-Released under the [MIT License](LICENSE).
-Third-party bridging tools referenced by this project (such as `CLIProxyAPI`) remain under their own licenses and copyrights.
+- `manager-core/` is an optional headless AntigravityManager wrapper to manage multi-account scheduling and quota tracking locally without a desktop tray.
+- **Dependency isolation**: It contains its own Node.js / Electron dependency tree and is only built if explicitly deployed. Running `python cc_relay.py serve` **does not depend on** and will not automatically build this subsystem.
+- **Operator-only deployment scripts**: `manager-core/tools/deploy-local.py` is a manual migration helper for operators and **is never executed automatically by the relay, test runner, or lifecycle watchdog**.
+
+---
+
+## 📄 License and Terms
+
+- **Root project code (`cc-relay`)**: Released under the [MIT License](LICENSE). Pure Python standard library implementation, free for both commercial and non-commercial use.
+- **Optional subsystem (`manager-core/`)**: Derived and adapted from Draculabo/AntigravityManager (v0.20.0), licensed under [CC-BY-NC-SA-4.0](manager-core/LICENSE) (includes attribution, share-alike, and **non-commercial use restrictions**). See [manager-core/NOTICE.md](manager-core/NOTICE.md).
+- Third-party bridging tools referenced by this project (such as `CLIProxyAPI`) remain under their own licenses and copyrights.

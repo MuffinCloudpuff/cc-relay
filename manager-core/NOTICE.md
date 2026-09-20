@@ -12,3 +12,5 @@ official build or an attestation of the installed Manager binary.
 Generated upstream/ contains the pinned source, not user account data. Only the
 headless entrypoint and its reachable original backend modules are built.
 Account scheduling and failover policies are intentionally not reimplemented.
+
+The root cc-relay project is independently licensed under the MIT License.
