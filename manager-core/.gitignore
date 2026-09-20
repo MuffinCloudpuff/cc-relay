@@ -1,0 +1,8 @@
+node_modules/
+dist/
+run/
+upstream/
+upstream.zip
+results/
+*.local.json
+*.log

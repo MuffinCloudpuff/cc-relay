@@ -38,3 +38,4 @@ prompts.json
 relay-status.json
 _diag.log
 .claude/
+.playwright-cli/
