@@ -977,6 +977,9 @@ async function refresh(){
   const tm=st.tier_modifier||{};
   document.querySelectorAll('.tmod').forEach(box=>{
     if(!box.dataset.tier)return;
+    // Keep the optimistic selection visible until its POST has completed.
+    // Otherwise the periodic status poll can immediately paint the old value.
+    if(box.dataset.pending==='1')return;
     const tier=box.dataset.tier;
     const cur=tm[tier]||'original';
     box.querySelectorAll('.tmod-btn').forEach(b=>{
@@ -1248,7 +1251,8 @@ async function savePrompt(tier,custom){
   try{
     const r=await api('/api/prompts',{tier,custom});
     if(r.error)throw new Error(r.error);
-    toast((TIER_NAME[tier]||tier)+'档提示词已保存'+(enabled?' (已生效)':''));
+    const isActive=!!(st&&st.tier_modifier&&st.tier_modifier[tier]==='custom');
+    toast((TIER_NAME[tier]||tier)+'档提示词已保存'+(isActive?'（已生效）':'（选择“自”后生效）'));
     await loadPromptsData();
   }catch(e){
     toast('保存失败: '+e,true);
