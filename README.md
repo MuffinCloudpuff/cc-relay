@@ -114,11 +114,20 @@ python cc_relay.py serve
 
 访问浏览器控制台：**[http://127.0.0.1:8610](http://127.0.0.1:8610)**
 
-### 3. 配置 Claude Code 环境变量
+### 3. 配置客户端连接
 
-运行项目提供的安全注入工具（会自动增量合并至 `~/.claude/settings.json`）：
+#### A. Claude 桌面客户端 (GUI) 官方 3P 推理网关（推荐）
+运行配置工具一键接入桌面客户端（完全隔离写入独立的本地 3P 配置文件，绝不污染 CLI）：
 ```bash
-python apply_settings.py
+# 一键启用 Claude Desktop 官方 3P 网关
+python apply_settings.py --desktop
+```
+重启 Claude Desktop 客户端即可直接使用本地中转！如需切回官方账号登录，执行 `python apply_settings.py --remove-desktop`。
+
+#### B. Claude Code CLI 配置
+运行注入工具增量合并至 `~/.claude/settings.json`：
+```bash
+python apply_settings.py --cli
 ```
 
 或手动在终端设置环境变量：
@@ -133,7 +142,7 @@ export ANTHROPIC_SMALL_FAST_MODEL="FAST_MODEL[1m]"
 
 现在直接运行 `claude`，所有流量即可畅享智能分流与监控！
 
-> 💡 详细的 Windows 一键集成、Codex / Gemini 上游配置、后台服务化教程请参阅 **[INSTALL.md](INSTALL.md)**。
+> 💡 详细的桌面版 3P 网关、Windows 一键集成、Codex / Gemini 上游配置、后台服务化教程请参阅 **[INSTALL.md](INSTALL.md)**。
 
 ---
 

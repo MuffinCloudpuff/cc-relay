@@ -14,7 +14,9 @@ This guide walks through a complete `cc-relay` setup from scratch: installation,
    - [3.1 DeepSeek Direct](#31-deepseek-direct)
    - [3.2 Codex (CLIProxyAPI) Bridge](#32-codex-cliproxyapi-bridge)
    - [3.3 Gemini (Antigravity Tools) Bridge](#33-gemini-antigravity-tools-bridge)
-4. [Injecting the Claude Code Configuration](#4-injecting-the-claude-code-configuration)
+4. [Client Configuration (Desktop 3P & CLI)](#4-client-configuration)
+   - [4.1 Claude Desktop (GUI) 3P Inference Gateway](#41-claude-desktop-gui-3p-inference-gateway-recommended)
+   - [4.2 Injecting the Claude Code CLI Configuration](#42-injecting-the-claude-code-cli-configuration)
 5. [Seamless Automation on Windows (Wrapper & Lifecycle)](#5-seamless-automation-on-windows-wrapper--lifecycle)
 6. [Daemonization on macOS / Linux](#6-daemonization-on-macos--linux)
 7. [Daily Operations and Diagnostics](#7-daily-operations-and-diagnostics)
@@ -122,18 +124,50 @@ cp config.example.json config.json
 
 ---
 
-## 4. Injecting the Claude Code Configuration
+## 4. Client Configuration
 
-`cc-relay` can merge the relay routing environment variables into your global Claude config file `~/.claude/settings.json` in one step.
+### 4.1 Claude Desktop (GUI) 3P Inference Gateway (Recommended)
 
-### Method A: automated injection script (recommended)
+The official Claude Desktop application features a native **3P (Third-Party Inference Gateway)** deployment mode. By applying the local 3P profile, Claude Desktop will route all chat inferences directly through `cc-relay` (port 8400), without requiring a claude.ai subscription or login credentials.
+
+> 📌 **Key Feature**: This configuration writes to an isolated local profile directory (`%LOCALAPPDATA%\Claude-3p`). It is **completely decoupled from Claude Code CLI and will never touch or modify your CLI configuration**.
+
+#### Enable 3P Mode in One Step:
+```bash
+# automatically reads config.json and configures Claude Desktop 3P gateway
+python apply_settings.py --desktop
+
+# or preview the profile before writing
+python apply_settings.py --desktop --dry-run
+```
+*(Windows users can also double-click `apply_settings.bat`)*
+
+Once applied, **completely exit and restart Claude Desktop**:
+- Claude Desktop will start in 3P gateway mode and send all chat requests to `cc-relay` (`http://127.0.0.1:8400`).
+- You can monitor live requests and tokens in the Web Dashboard (`http://127.0.0.1:8610`).
+- **Note**: In 3P mode, the application disconnects from the claude.ai cloud account; all conversation histories are stored safely on your local machine.
+
+#### Revert to Official 1P Default:
+To switch back to official claude.ai cloud account login:
+```bash
+python apply_settings.py --remove-desktop
+```
+Restart Claude Desktop to return to the standard account login screen.
+
+---
+
+### 4.2 Injecting the Claude Code CLI Configuration
+
+If you also wish to configure the terminal Claude Code CLI to use `cc-relay`:
+
+#### Method A: automated injection script (requires `--cli`)
 
 ```bash
 # preview what would be written (safe, read-only)
-python apply_settings.py --dry-run
+python apply_settings.py --cli --dry-run
 
-# perform the safe incremental merge
-python apply_settings.py
+# perform the safe incremental merge into ~/.claude/settings.json
+python apply_settings.py --cli
 ```
 
 `apply_settings.py` reads the current `config.json` for the listen port and `fake_api_key`, then merges the following variables into the `env` node of `settings.json` — **without ever losing or overwriting your other custom environment variables**:
@@ -142,7 +176,7 @@ python apply_settings.py
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8400",
-    "ANTHROPIC_AUTH_TOKEN": "***",
+    "ANTHROPIC_AUTH_TOKEN": "sk-relay-local-0000",
     "ANTHROPIC_MODEL": "relay-main[1m]",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "OPUS_MODEL[1m]",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "SONNET_MODEL[1m]",
@@ -151,14 +185,14 @@ python apply_settings.py
 }
 ```
 
-### Method B: per-terminal environment variables
+#### Method B: per-terminal environment variables
 
 If you would rather not touch the global config file, inject them per terminal:
 
 **Windows PowerShell:**
 ```powershell
 $env:ANTHROPIC_BASE_URL="http://127.0.0.1:8400"
-$env:ANTHROPIC_AUTH_TOKEN="***"
+$env:ANTHROPIC_AUTH_TOKEN="sk-relay-local-0000"
 $env:ANTHROPIC_MODEL="relay-main[1m]"
 $env:ANTHROPIC_DEFAULT_OPUS_MODEL="OPUS_MODEL[1m]"
 $env:ANTHROPIC_DEFAULT_SONNET_MODEL="SONNET_MODEL[1m]"
@@ -169,7 +203,7 @@ claude
 **macOS / Linux Bash / Zsh:**
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8400"
-export ANTHROPIC_AUTH_TOKEN="***"
+export ANTHROPIC_AUTH_TOKEN="sk-relay-local-0000"
 export ANTHROPIC_MODEL="relay-main[1m]"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="OPUS_MODEL[1m]"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="SONNET_MODEL[1m]"
@@ -193,9 +227,12 @@ To keep the experience friction-free, the project ships a Windows wrapper and ba
    - then hands over to the real Claude Code.
 3. Once every `claude.exe` process has exited, the watchdog notices the idle timeout and stops the relay and the Codex upstream, freeing system resources.
 
-### 5.2 Desktop shortcut
+### 5.2 Web Dashboard & Monitoring
 
-Double-click `start_desktop.bat` to bring the services up and open the web dashboard (`http://127.0.0.1:8610`) in your default browser.
+With the relay running, open **[http://127.0.0.1:8610](http://127.0.0.1:8610)** in your browser at any time to inspect:
+- Active routing modes and upstream models;
+- Live packet capture and token usage from both Desktop and CLI clients;
+- Prompt Cache hit rate and upstream health probes.
 
 ---
 

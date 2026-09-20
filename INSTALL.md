@@ -14,7 +14,9 @@
    - [3.1 DeepSeek 上游直连](#31-deepseek-上游直连)
    - [3.2 Codex (CLIProxyAPI) 桥接](#32-codex-cliproxyapi-桥接)
    - [3.3 Gemini (Antigravity Tools) 桥接](#33-gemini-antigravity-tools-桥接)
-4. [Claude Code 配置注入](#4-claude-code-配置注入)
+4. [客户端配置接入 (Desktop 3P & CLI)](#4-客户端配置接入)
+   - [4.1 Claude 桌面客户端 (GUI) 3P 推理网关配置](#41-claude-桌面客户端-gui-3p-推理网关配置推荐)
+   - [4.2 Claude Code CLI 配置注入](#42-claude-code-cli-配置注入)
 5. [Windows 无感自动化体验 (Wrapper & Lifecycle)](#5-windows-无感自动化体验-wrapper--lifecycle)
 6. [macOS / Linux 守护与服务化](#6-macos--linux-守护与服务化)
 7. [日常运维与诊断命令](#7-日常运维与诊断命令)
@@ -123,18 +125,49 @@ cp config.example.json config.json
 
 ---
 
-## 4. Claude Code 配置注入
+## 4. 客户端配置接入
 
-`cc-relay` 支持一键将中转路由所需的环境变量增量合并至用户全局 Claude 配置文件 `~/.claude/settings.json`。
+### 4.1 Claude 桌面客户端 (GUI) 3P 推理网关配置（推荐）
 
-### 方式 A：自动化注入脚本（推荐）
+Claude 官方桌面客户端（Claude Desktop）内置了官方 **3P（第三方推理网关 / Inference Gateway）** 模式。通过配置本地 3P 配置文件，客户端将直接将推理流量交给 `cc-relay` (8400 端口)，无需登录官方账号，也不受官方账号计费或限制。
 
+> 📌 **重要特性**：该配置完全写入独立的用户目录（`%LOCALAPPDATA%\Claude-3p`），**与本地 Claude Code CLI 彻底隔离，绝不影响或改动终端 CLI 的既有配置**。
+
+#### 一键启用 3P 模式：
 ```bash
-# 预览即将写入的配置（安全只读）
-python apply_settings.py --dry-run
+# 自动读取 config.json 并配置 Claude Desktop 3P 网关
+python apply_settings.py --desktop
 
-# 正式执行安全增量合并
-python apply_settings.py
+# 或者预览将要写入的配置
+python apply_settings.py --desktop --dry-run
+```
+*(Windows 用户也可直接双击运行 `apply_settings.bat`)*
+
+写入成功后，**完全退出并重启 Claude Desktop** 客户端即可生效！
+- 客户端将自动进入 3P 推理网关模式，发出的聊天请求将直连 `cc-relay` (8400 端口)。
+- 可在 Web 控制台 (`http://127.0.0.1:8610`) 查看发出的请求报文。
+- **说明**：3P 模式下客户端断开与 claude.ai 云端同步，所有聊天记录均妥善保存在本地设备上。
+
+#### 一键恢复官方 1P 默认：
+如果需要切回官方原生登录模式（通过 Google/Apple/邮箱登录官方账号），只需执行：
+```bash
+python apply_settings.py --remove-desktop
+```
+重启 Claude Desktop 即可恢复官方账号登录界面。
+
+---
+
+### 4.2 Claude Code CLI 配置注入
+
+如果你同时希望配置终端的 Claude Code CLI 走 `cc-relay`：
+
+#### 方式 A：自动化写入脚本（需显式指定 `--cli`）
+```bash
+# 预览即将写入 CLI 的环境变量（安全只读）
+python apply_settings.py --cli --dry-run
+
+# 执行安全增量合并至 ~/.claude/settings.json
+python apply_settings.py --cli
 ```
 
 `apply_settings.py` 会动态读取当前 `config.json` 的监听端口与 `fake_api_key`，并将以下变量合并至 `settings.json` 的 `env` 节点中，**绝不丢失或覆盖已有的其他自定义环境变量**：
@@ -152,9 +185,9 @@ python apply_settings.py
 }
 ```
 
-### 方式 B：终端临时环境变量
+#### 方式 B：终端临时环境变量
 
-如果不希望更改全局配置文件，可在各终端中单独注入：
+如果不希望更改全局配置文件，可在各终端会话中单独注入：
 
 **Windows PowerShell:**
 ```powershell
@@ -194,9 +227,12 @@ claude
    - 无缝转接执行原生的 Claude Code。
 3. 当所有 `claude.exe` 进程退出后，看门狗在检测到空闲超时后会自动停止中转与 Codex 上游，释放系统资源。
 
-### 5.2 桌面快捷方式
+### 5.2 Web 监控与控制台访问
 
-双击 `start_desktop.bat` 可快速启动服务并自动在默认浏览器中打开 Web 监控仪表盘（`http://127.0.0.1:8610`）。
+服务启动后，随时在浏览器中打开 **[http://127.0.0.1:8610](http://127.0.0.1:8610)**，即可实时查看：
+- 当前活跃路由与模型分派情况；
+- 桌面客户端与 CLI 产生的每一次请求报文抓包与 Token 吞吐；
+- Prompt Cache 命中率与上游健康度。
 
 ---
 

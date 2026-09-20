@@ -109,12 +109,21 @@ python cc_relay.py serve
 
 Open the console at **[http://127.0.0.1:8610](http://127.0.0.1:8610)**.
 
-### 3. Configure the Claude Code environment
+### 3. Connect your clients
 
-Run the bundled safe injection tool (it merges incrementally into `~/.claude/settings.json`):
+#### A. Claude Desktop (GUI) 3P Inference Gateway (Recommended)
+Configure Claude Desktop in one step (writes to an isolated local 3P profile, never touches your CLI):
+```bash
+# configure Claude Desktop official 3P gateway
+python apply_settings.py --desktop
+```
+Restart Claude Desktop to start using the local relay! To switch back to official account login, run `python apply_settings.py --remove-desktop`.
+
+#### B. Claude Code CLI
+Run the bundled safe injection tool (incremental merge into `~/.claude/settings.json`):
 
 ```bash
-python apply_settings.py
+python apply_settings.py --cli
 ```
 
 Or set the variables manually in your terminal:
@@ -130,7 +139,7 @@ export ANTHROPIC_SMALL_FAST_MODEL="FAST_MODEL[1m]"
 
 Now just run `claude` and all of its traffic gets smart dispatch and monitoring.
 
-> 💡 For the full Windows one-click integration, Codex / Gemini upstream setup and background service instructions, see **[INSTALL.en.md](INSTALL.en.md)**.
+> 💡 For the full Desktop 3P gateway guide, Windows one-click integration, Codex / Gemini upstream setup and background service instructions, see **[INSTALL.en.md](INSTALL.en.md)**.
 
 ---
 
