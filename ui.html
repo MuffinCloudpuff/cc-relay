@@ -693,6 +693,9 @@ const MODEL_EFFORTS={
   'gpt-5.5':                    ['low','medium','high','xhigh'],           // 4 档 (上一代旗舰)
   'gpt-5.3-codex-spark':        ['low','high'],                            // 2 档 (实时模型, 档位固定)
   // Gemini 的 thinking 由 Antigravity 兼容层决定, relay 初期不覆盖客户端字段。
+  'gemini-3.7-flash-low':        ['off'],
+  'gemini-3.7-flash-thinking':   ['off'],
+  'gemini-3.7-flash':            ['off'],
   'gemini-2.5-flash':            ['off'],
   'gemini-2.5-pro':              ['off'],
 };
@@ -706,16 +709,18 @@ const isCodex=m=>m&&m.startsWith('gpt-')&&!m.startsWith('gpt-image')&&m!=='codex
 const escHtml=s=>(s==null?'-':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const cacheSummary=c=>{
   const x=c&&c.cache;
-  if(!x||x.cache_hit_rate==null)return {label:'—',title:'上游未返回缓存 usage'};
-  const pct=(Number(x.cache_hit_rate)*100).toFixed(1)+'%';
-  return {label:pct,title:'命中 '+(x.cache_read_tokens||0).toLocaleString()+' / 总 '+(x.cache_total_tokens||0).toLocaleString()+' token'};
+  if(!x||x.cache_hit_rate==null)return {label:'—',className:'cache-none',title:'上游未返回缓存 usage'};
+  const rate=Number(x.cache_hit_rate);
+  const pct=(rate*100).toFixed(1)+'%';
+  const className=rate<=0?'cache-none':(rate<.6?'cache-bad':(rate<.9?'cache-warn':'cache-ok'));
+  return {label:pct,className,title:'命中 '+(x.cache_read_tokens||0).toLocaleString()+' / 总 '+(x.cache_total_tokens||0).toLocaleString()+' token'};
 };
 const trafficCacheSummary=r=>{
   const rate=Number(r&&r.cache_hit_rate);
   const total=Number(r&&r.input_tokens)||0;
   if(!Number.isFinite(rate)||r.cache_hit_rate==null)return {label:'—',className:'cache-none',title:'暂无可用缓存 usage'};
   const pct=(rate*100).toFixed(1)+'%';
-  const className=rate<.6?'cache-bad':(rate<.9?'cache-warn':'cache-ok');
+  const className=rate<=0?'cache-none':(rate<.6?'cache-bad':(rate<.9?'cache-warn':'cache-ok'));
   return {label:pct,className,title:'命中 '+Number(r.cache_read_tokens||0).toLocaleString()+' / 输入总计 '+total.toLocaleString()+' token；缓存写入 '+Number(r.cache_creation_tokens||0).toLocaleString()+'；统计 '+Number(r.cache_requests||0).toLocaleString()+' 次'};
 };
 
@@ -961,7 +966,7 @@ async function refresh(){
   $('#c-gm').classList.toggle('active-gm',gm);
   buildSel($('#sel-ds'),models,ds?(saved||'deepseek-flash'):'deepseek-flash',st.effort||'medium');
   buildSel($('#sel-cx'),models,cx?(saved||'gpt-5.6-sol'):'gpt-5.6-sol',st.effort||'medium');
-  buildSel($('#sel-gm'),models,gm?(saved||((st.models_gemini||[])[0]||'gemini-2.5-flash')):((st.models_gemini||[])[0]||'gemini-2.5-flash'),'off');
+  buildSel($('#sel-gm'),models,gm?(saved||((st.models_gemini||[])[0]||'gemini-3.7-flash-low')):((st.models_gemini||[])[0]||'gemini-3.7-flash-low'),'off');
   const tiers=st.tiers||{},te=st.tier_efforts||{};
   const def={main:'deepseek-flash',opus:'gpt-5.6-sol',sonnet:'deepseek-flash',fast:'deepseek-flash',agent:'deepseek-flash'};
   TIERS.forEach(t=>{
@@ -1085,7 +1090,6 @@ async function loadCalls(force){
       const rel=(c.route_reason||'').replace('hybrid:','h:').replace('route:','r:');
       const cst=c.status||0;
       const cs=cacheSummary(c);
-      const cacheColor=cs.label==='—'?'var(--faint)':(Number(c.cache.cache_hit_rate)>0?'var(--hb)':'var(--dim)');
       html+='<tr data-idx="'+c.idx+'"><td style="color:var(--faint)">'+escHtml((c.ts||'').slice(11))+'</td>'+
         '<td class="mono">'+escHtml(c.orig_model)+'</td>'+
         '<td class="arrow">→</td>'+
@@ -1093,7 +1097,7 @@ async function loadCalls(force){
         '<td><span class="tagc '+(c.route==='codex'?'codex':((c.route==='antigravity'||c.route==='gemini')?'gemini':'deepseek'))+'">'+escHtml(c.route)+'</span></td>'+
         '<td style="color:var(--faint)">'+escHtml(rel)+'</td>'+
         '<td class="mono" style="color:'+(cst<400?'var(--hb)':'var(--red)')+'">'+cst+'</td>'+
-        '<td class="mono" title="'+escHtml(cs.title)+'" style="color:'+cacheColor+'">'+cs.label+'</td>'+
+        '<td class="mono '+cs.className+'" title="'+escHtml(cs.title)+'">'+cs.label+'</td>'+
         '<td>'+(c.agent_id?'<span class="src agent">子代理</span>':'<span class="src main">主循环</span>')+'</td></tr>';
       html+='<tr><td colspan="9" style="padding:0;border:none"><div class="detail" id="dt-'+c.idx+'"></div></td></tr>';
     }

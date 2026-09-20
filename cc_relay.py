@@ -268,11 +268,11 @@ CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "
                 "gpt-5.3-codex-spark"]
 DEEPSEEK_MODELS = ["deepseek-flash", "deepseek-v4-pro"]
 # Antigravity 8045 的运行时模型优先; 这些只用于上游不可用时的安全回退。
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-pro"]
+GEMINI_MODELS = ["gemini-3.7-flash-low", "gemini-3.7-flash-thinking", "gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
 ALL_MODELS = DEEPSEEK_MODELS + CODEX_MODELS + GEMINI_MODELS
 DEFAULT_CODEX_MAP = "gpt-5.6-sol"
 DEFAULT_DS_MAP = "deepseek-flash"
-DEFAULT_GEMINI_MAP = "gemini-2.5-flash"
+DEFAULT_GEMINI_MAP = "gemini-3.7-flash-low"
 # 推理强度 -> 请求 body 的 thinking 参数
 # 档位依据: GPT-5.6 API 支持 none/low/medium/high/xhigh/max; 经 CLIProxyAPI 转换后
 #   budget 阈值映射到 codex 的 reasoning effort(本地实测 xhigh/32768 触发思考 token)
