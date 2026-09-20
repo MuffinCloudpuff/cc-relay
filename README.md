@@ -1,5 +1,7 @@
 # cc-relay
 
+> 🌐 [English](README.en.md) | 简体中文
+
 <p align="center">
   <b>零依赖 · 高性能 · 多上游智能路由 · Claude Code 本地流量调度与特征修剪中枢</b>
 </p>

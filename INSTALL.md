@@ -1,5 +1,7 @@
 # cc-relay 部署与实战安装手册
 
+> 🌐 [English](INSTALL.en.md) | 简体中文
+
 本手册提供 `cc-relay` 从零开始的完整安装、跨平台配置、三大上游接入、Claude Code 注入以及常见故障排查指引。
 
 ---
