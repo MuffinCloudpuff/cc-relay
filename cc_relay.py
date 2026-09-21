@@ -36,6 +36,17 @@ def load_conf():
 
 
 CONF_LOCK = threading.Lock()
+_CODEX_LOGIN = None
+_CODEX_LOGIN_LOCK = threading.Lock()
+
+
+def get_codex_login():
+    global _CODEX_LOGIN
+    with _CODEX_LOGIN_LOCK:
+        if _CODEX_LOGIN is None:
+            from codex_login import CodexLogin
+            _CODEX_LOGIN = CodexLogin(BASE, load_conf, _save_conf, CONF_LOCK)
+        return _CODEX_LOGIN
 
 
 def _save_conf(conf):
@@ -366,6 +377,8 @@ REASONING_MAP = {
 EFFORT_VALUES = tuple(REASONING_MAP)
 _MODELS_CACHE = {"ts": 0, "ds": list(DEEPSEEK_MODELS), "cx": list(CODEX_MODELS),
                  "gm": list(GEMINI_MODELS), "health": {}}
+_MODELS_LOCK = threading.Lock()
+_MODELS_REFRESHING = False
 
 
 def _fetch_models(base, key, timeout=6, prefix=None):
@@ -460,31 +473,43 @@ def probe_upstream(conf, name="antigravity", timeout=6):
                 "messages_path": base + "/v1/messages"}
 
 
+def _bg_fetch_models(conf, now):
+    global _MODELS_REFRESHING
+    try:
+        ds = _fetch_models((_upstream_conf(conf, "deepseek")).get("base", ""),
+                           _key_for(conf, _upstream_conf(conf, "deepseek"), "deepseek"), prefix="deepseek-")
+        cx = _fetch_models((_upstream_conf(conf, "codex")).get("base", ""),
+                           _key_for(conf, _upstream_conf(conf, "codex"), "codex"), prefix="gpt-")
+        gm = _fetch_models((_upstream_conf(conf, "antigravity")).get("base", ""),
+                           _key_for(conf, _upstream_conf(conf, "antigravity"), "antigravity"), prefix="gemini-")
+        if not ds:
+            ds = list(DEEPSEEK_MODELS)
+        if not cx:
+            cx = list(CODEX_MODELS)
+        if not gm:
+            gm = list(GEMINI_MODELS)
+        with _MODELS_LOCK:
+            _MODELS_CACHE.update({"ts": now, "ds": ds, "cx": cx, "gm": gm,
+                                  "health": {"deepseek": bool(ds), "codex": bool(cx),
+                                              "antigravity": bool(gm)}})
+    finally:
+        _MODELS_REFRESHING = False
+
+
 def live_models(conf, ttl=120):
-    """实时模型列表(带缓存): 优先从三上游拉, 失败回退各自常量"""
+    """实时模型列表(带缓存): 后台异步从三上游拉, 避免网络阻塞主工作线程, 失败回退各自常量"""
+    global _MODELS_REFRESHING
     now = time.time()
-    if now - _MODELS_CACHE["ts"] < ttl:
-        return _MODELS_CACHE
-    ds = _fetch_models((_upstream_conf(conf, "deepseek")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "deepseek"), "deepseek"), prefix="deepseek-")
-    cx = _fetch_models((_upstream_conf(conf, "codex")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "codex"), "codex"), prefix="gpt-")
-    gm = _fetch_models((_upstream_conf(conf, "antigravity")).get("base", ""),
-                       _key_for(conf, _upstream_conf(conf, "antigravity"), "antigravity"), prefix="gemini-")
-    if not ds:
-        ds = list(DEEPSEEK_MODELS)
-    if not cx:
-        cx = list(CODEX_MODELS)
-    if not gm:
-        gm = list(GEMINI_MODELS)
-    _MODELS_CACHE.update({"ts": now, "ds": ds, "cx": cx, "gm": gm,
-                          "health": {"deepseek": bool(ds), "codex": bool(cx),
-                                      "antigravity": bool(gm)}})
-    return _MODELS_CACHE
+    with _MODELS_LOCK:
+        expired = (now - _MODELS_CACHE["ts"] >= ttl)
+        if expired and not _MODELS_REFRESHING:
+            _MODELS_REFRESHING = True
+            threading.Thread(target=_bg_fetch_models, args=(conf, now), daemon=True).start()
+        return dict(_MODELS_CACHE)
 
 
 def _strip_model_suffix(model):
-    """剥离 CC 附加的后缀: deepseek-chat[1m] / 本地中转[1m] -> 基名"""
+    """剥离 CC 附加的后缀: deepseek-chat[1m] / relay-main[1m] / 本地中转[1m] -> 基名"""
     if not model:
         return "", ""
     import re as _re
@@ -494,20 +519,55 @@ def _strip_model_suffix(model):
     return model.strip(), ""
 
 
+RELAY_MAIN_PLACEHOLDERS = {
+    "本地中转",
+    "relay",
+    "local",
+    "relay-main",
+    "cc-relay",
+    "main",
+}
+
+
+def is_relay_placeholder(model: str) -> bool:
+    """判断是否为中转占位模型名 (不区分大小写，支持常见变体与前缀)"""
+    if not model:
+        return True
+    m = str(model).strip().lower()
+    if m in RELAY_MAIN_PLACEHOLDERS:
+        return True
+    if m.startswith(("relay-main", "relay_", "local-", "local_")):
+        return True
+    if m in ("relay", "local") or "本地中转" in m:
+        return True
+    return False
+
+
 def _is_subagent(headers, body_json):
-    """识别子代理: 请求头带 x-claude-code-agent-id, 或 system 里 billing header
+    """识别子代理: 请求头带 x-claude-code-agent-id (大小写不敏感), 或 system 里 billing header
     含 cc_is_subagent=true, 或提示含 'Claude Agent SDK' / 'You are a Claude agent'
-    (主循环的 system 是 'You are Claude Code', 不冲突)"""
+    / 'software architect and planning specialist' 等 (Plan 代理特定特征)"""
     try:
-        if (headers or {}).get("x-claude-code-agent-id"):
-            return True
+        hdrs = headers or {}
+        if hasattr(hdrs, "items"):
+            for k, v in hdrs.items():
+                if str(k).strip().lower() == "x-claude-code-agent-id" and v:
+                    return True
         sys = (body_json or {}).get("system")
         txt = ""
         if isinstance(sys, str):
             txt = sys
         elif isinstance(sys, list):
             txt = " ".join((c.get("text") or "") for c in sys if isinstance(c, dict))
-        return ("cc_is_subagent=true" in txt) or ("Claude Agent SDK" in txt) or ("You are a Claude agent" in txt)
+        signatures = (
+            "cc_is_subagent=true",
+            "Claude Agent SDK",
+            "You are a Claude agent",
+            "software architect and planning specialist",
+            "planning specialist for Claude Code",
+            "You are a software engineer for Claude Code",
+        )
+        return any(sig in txt for sig in signatures)
     except Exception:
         return False
 
@@ -822,9 +882,9 @@ def pick_route(conf, headers, body_json):
     raw_model = ""
     if isinstance(body_json, dict):
         raw_model = body_json.get("model") or ""
-    # 剥离 [1m] 等后缀; 若基名是中转占位名(本地中转等), 视为未指定模型
+    # 剥离 [1m] 等后缀; 若基名是中转占位名(relay-main, 本地中转等), 视为未指定模型
     model, _suffix = _strip_model_suffix(raw_model)
-    if not model or model in ("本地中转", "relay", "local"):
+    if is_relay_placeholder(model):
         model = ""
 
     if route == "codex":
@@ -844,24 +904,25 @@ def pick_route(conf, headers, body_json):
     tier = router.get("tiers") or {}
     def _up(m):
         return provider_for_model(m, conf) or "deepseek"
+    m_lower = model.lower()
     # OPUS 档(plan/复杂推理) -> 高价值模型
-    if model in ("OPUS_MODEL", "claude-opus-5", "claude-opus-4-6"):
+    if m_lower in ("opus_model", "claude-opus-5", "claude-opus-4-6", "relay-opus"):
         m = (tier.get("opus") or hv).strip()
         return _up(m), m, "hybrid:opus"
     # SONNET 档(子代理) -> 可单独配
-    if model in ("SONNET_MODEL", "claude-sonnet-5"):
+    if m_lower in ("sonnet_model", "claude-sonnet-5", "relay-sonnet"):
         m = (tier.get("sonnet") or dd).strip()
         return _up(m), m, "hybrid:sonnet"
     # FAST 档(后台小调用)
-    if model in ("FAST_MODEL", "claude-haiku"):
+    if m_lower in ("fast_model", "claude-haiku", "relay-fast"):
         m = (tier.get("fast") or dd).strip()
         return _up(m), m, "hybrid:fast"
     if provider_for_model(model, conf) == "codex":
         return "codex", model, "hybrid:gpt-direct"
     if provider_for_model(model, conf) == "antigravity":
         return "antigravity", model, "hybrid:antigravity-direct"
-    # 子代理档(Claude Agent SDK, model=本地中转) -> 单独分流, 不并入主模型档
-    if not model and _is_subagent(headers, body_json):
+    # 子代理档(Claude Agent SDK / Plan 代理, model 为空或中转占位名) -> 单独分流, 不并入主模型档
+    if (not model or is_relay_placeholder(model)) and _is_subagent(headers, body_json):
         m = (tier.get("agent") or dd).strip()
         return _up(m), m, "hybrid:agent"
     # 主模型档 / 其余；默认保持旧配置的 DeepSeek 行为
@@ -968,6 +1029,8 @@ def _resp_cache_usage(resp_body):
             continue
         payload = line[5:].strip()
         if not payload or payload == "[DONE]":
+            continue
+        if "usage" not in payload and "cache" not in payload:
             continue
         try:
             walk(json.loads(payload))
@@ -1102,42 +1165,73 @@ def _find_record_by_idx(target_idx, max_bytes=800_000_000):
     return None
 
 
+_STATUS_TAIL_BYTES = 500_000_000
+_CALLS_TAIL_BYTES = 600_000_000
+_CALLS_CACHE_LIMIT = 8
+_STATS_CACHE = {"fingerprint": None, "rows": None, "total": 0}
+_CALLS_CACHE = {}
+_STATS_LOCK = threading.Lock()
+_CALLS_LOCK = threading.Lock()
+
+
+def _records_fingerprint():
+    """On-disk cache key; intentionally independent of this process's _IDX."""
+    try:
+        stat = os.stat(RECORDS)
+    except OSError:
+        return (os.path.abspath(RECORDS), None, None, None, None)
+    return (os.path.abspath(RECORDS), getattr(stat, "st_dev", None),
+            getattr(stat, "st_ino", None), stat.st_mtime_ns, stat.st_size)
+
+
 def stats_snapshot():
-    """给 UI 的实时流量(从文件尾读足够条数, 适配超大单条记录)"""
-    recs = _iter_records_tail()
-    by = {}
-    for r in recs:
-        real_model = _resp_model(r.get('resp_body')) or r.get('sent_model') or r.get('orig_model')
-        key = (r.get('route'), real_model)
-        b = by.setdefault(key, {'route': r.get('route'), 'model': real_model,
-                                'sent': r.get('sent_model'), 'req': 0, 'ok': 0, 'err': 0, 'last': 0,
-                                'input_tokens': 0, 'cache_read_tokens': 0,
-                                'cache_creation_tokens': 0, 'cache_requests': 0})
-        usage = _resp_cache_usage(r.get('resp_body'))
-        if usage:
-            b['input_tokens'] += usage.get('cache_total_tokens', 0) or 0
-            b['cache_read_tokens'] += usage.get('cache_read_tokens', 0) or 0
-            b['cache_creation_tokens'] += usage.get('cache_creation_tokens', 0) or 0
-            b['cache_requests'] += 1
-        b['req'] += 1
-        st = r.get('resp_status') or 0
-        if st and st < 400:
-            b['ok'] += 1
+    """Cache record aggregates; configuration and model state remain live per call."""
+    with _STATS_LOCK:
+        # Capture before parsing. An append during the read must invalidate it next time.
+        fingerprint = _records_fingerprint()
+        if _STATS_CACHE["fingerprint"] == fingerprint and _STATS_CACHE["rows"] is not None:
+            rows = [dict(row) for row in _STATS_CACHE["rows"]]
+            total_records = _STATS_CACHE["total"]
         else:
-            b['err'] += 1
-        b['last'] = r.get('idx', 0)
-    for b in by.values():
-        total = b['input_tokens']
-        b['cache_hit_rate'] = (b['cache_read_tokens'] / total) if total else None
-    rows = sorted(by.values(), key=lambda x: -x['last'])
+            recs = _iter_records_tail(max_records=400, max_bytes=_STATUS_TAIL_BYTES)
+            by = {}
+            for r in recs:
+                real_model = _resp_model(r.get('resp_body')) or r.get('sent_model') or r.get('orig_model')
+                key = (r.get('route'), real_model)
+                b = by.setdefault(key, {'route': r.get('route'), 'model': real_model,
+                                        'sent': r.get('sent_model'), 'req': 0, 'ok': 0, 'err': 0, 'last': 0,
+                                        'input_tokens': 0, 'cache_read_tokens': 0,
+                                        'cache_creation_tokens': 0, 'cache_requests': 0})
+                usage = r.get('cache') if r.get('cache') is not None else _resp_cache_usage(r.get('resp_body'))
+                if usage:
+                    b['input_tokens'] += usage.get('cache_total_tokens', 0) or 0
+                    b['cache_read_tokens'] += usage.get('cache_read_tokens', 0) or 0
+                    b['cache_creation_tokens'] += usage.get('cache_creation_tokens', 0) or 0
+                    b['cache_requests'] += 1
+                b['req'] += 1
+                st = r.get('resp_status') or 0
+                if st and st < 400:
+                    b['ok'] += 1
+                else:
+                    b['err'] += 1
+                b['last'] = r.get('idx', 0)
+            for b in by.values():
+                total = b['input_tokens']
+                b['cache_hit_rate'] = (b['cache_read_tokens'] / total) if total else None
+            rows = sorted(by.values(), key=lambda x: -x['last'])
+            total_records = len(recs)
+            _STATS_CACHE.update({"fingerprint": fingerprint, "rows": rows, "total": total_records})
+            rows = [dict(row) for row in rows]
     conf = load_conf()
     rt = conf.get('router') or {}
     lm = live_models(conf)
     route = rt.get('route', 'hybrid')
     if route == 'gemini':
         route = 'antigravity'
+    codex_available = codex_up()
+    antigravity_available = antigravity_up(conf)
     # 兼容旧 UI 字段名，同时暴露 Gemini 独立模型桶。
-    return {'route': route, 'mode': route,
+    res = {'route': route, 'mode': route,
             'model': rt.get('model', ''),
             'models_ds': lm['ds'], 'models_codex': lm['cx'], 'models_gemini': lm['gm'],
             # 旧 UI / API 兼容别名
@@ -1186,15 +1280,58 @@ def stats_snapshot():
             },
             'deepseek_profile': {'default_model': 'deepseek-flash'},
             'hybrid_pins': {'ANTHROPIC_DEFAULT_OPUS_MODEL': 'gpt-5.6-sol'},
-            'proxy_running': codex_up(),
-            'rows': rows, 'total': len(recs),
-            'codex_up': codex_up(), 'antigravity_up': antigravity_up(conf),
+            'proxy_running': codex_available,
+            'rows': rows, 'total': total_records,
+            'codex_up': codex_available, 'antigravity_up': antigravity_available,
             'upstreams_status': {
                 'deepseek': {'available': True},
-                'codex': {'available': codex_up(), 'managed': True},
-                'gemini': {'available': antigravity_up(conf), 'managed': True},
+                'codex': {'available': codex_available, 'managed': True},
+                'gemini': {'available': antigravity_available, 'managed': True},
             },
             'last_up': _UP['last'], 'last_model': _UP['last_model']}
+    return res
+
+
+def _calls_snapshot(n):
+    """Return cached, body-free call viewer summaries for one requested range."""
+    with _CALLS_LOCK:
+        # Use the pre-read version just like status: append during parsing is not hidden.
+        fingerprint = _records_fingerprint()
+        key = (fingerprint, n)
+        cached = _CALLS_CACHE.get(key)
+        if cached is not None:
+            calls, total = cached
+            return {"calls": [dict(call) for call in calls], "total": total}
+        recs = _iter_records_tail(max_records=n, max_bytes=_CALLS_TAIL_BYTES)
+        calls = []
+        for r in recs:
+            body = r.get("body") or {}
+            headers = {k.lower(): v for k, v in (r.get("headers") or {}).items()}
+            cache = r.get("cache") if r.get("cache") is not None else _resp_cache_usage(r.get("resp_body"))
+            calls.append({
+                "idx": r.get("idx"),
+                "ts": r.get("ts"),
+                "path": r.get("path"),
+                "orig_model": r.get("orig_model"),
+                "sent_model": r.get("sent_model"),
+                "route": r.get("route"),
+                "route_reason": r.get("route_reason"),
+                "status": r.get("resp_status"),
+                "agent_id": (headers.get("x-claude-code-agent-id") or "")[:12],
+                "session": (headers.get("x-claude-code-session-id") or "")[:8],
+                "msgs": len(body.get("messages") or []),
+                "tools": len(body.get("tools") or []),
+                "stream": body.get("stream"),
+                "cache": cache,
+                "resp_error": r.get("resp_error"),
+                "has_custom_prompt": bool(r.get("custom_prompt")),
+                "stripped_banner": bool(r.get("stripped_banner")),
+            })
+        # Keep a bounded number of small summaries even when the UI changes n.
+        if len(_CALLS_CACHE) >= _CALLS_CACHE_LIMIT:
+            _CALLS_CACHE.clear()
+        _CALLS_CACHE[key] = (calls, len(calls))
+        return {"calls": [dict(call) for call in calls], "total": len(calls)}
 
 
 # ---------- HTTP ----------
@@ -1458,6 +1595,7 @@ class Relay(BaseHTTPRequestHandler):
                 "custom_prompt": custom_prompt_applied,
                 "upstream": upstream, "resp_status": status,
                 "resp_body": rbody.decode("utf-8", "replace")[:conf.get("max_body_capture", 2000000)],
+                "cache": _resp_cache_usage(rbody.decode("utf-8", "replace")[:conf.get("max_body_capture", 2000000)]),
                 "resp_error": err,
             })
         except Exception:
@@ -1513,8 +1651,46 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(b)))
+        if self.path.split("?")[0].startswith("/api/codex/login"):
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(b)
+
+    def _codex_login_allowed(self, write=False):
+        try:
+            host = self.headers.get("Host", "")
+            target = urlsplit("http://" + host)
+            allowed = (is_loopback_host(self.client_address[0])
+                       and is_loopback_host(target.hostname)
+                       and target.port == self.server.server_port
+                       and not target.username and not target.password
+                       and not target.path and not target.query and not target.fragment)
+            origin = self.headers.get("Origin")
+            if origin is not None and origin != "http://" + host:
+                allowed = False
+            if self.headers.get("Sec-Fetch-Site") not in (None, "none", "same-origin"):
+                allowed = False
+            if write:
+                allowed = (allowed and origin == "http://" + host
+                           and self.headers.get("X-CC-Relay-UI") == "1"
+                           and self.headers.get_content_type() == "application/json")
+        except ValueError:
+            allowed = False
+        if not allowed:
+            self.close_connection = True
+            # Drain only small, bounded bodies so Windows can deliver the 403
+            # instead of resetting a connection with unread incoming data.
+            if write and not self.headers.get("Transfer-Encoding"):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if 0 < length <= 1024:
+                        self.connection.settimeout(1)
+                        self.rfile.read(length)
+                except (ValueError, OSError):
+                    pass
+            self._json({"error": "Codex login requires the local relay UI"}, 403)
+        return allowed
 
     def _calls(self):
         """最近 N 条调用摘要(抓包查看器): CC发了什么 / 我们选了谁转发"""
@@ -1522,32 +1698,7 @@ class UIHandler(BaseHTTPRequestHandler):
         q = parse_qs(urlparse(self.path).query)
         n = int((q.get("n") or ["100"])[0])
         n = max(1, min(n, 1000))
-        recs = _iter_records_tail(max_records=n, max_bytes=600_000_000)
-        out = []
-        for r in recs:
-            b = r.get("body") or {}
-            h = {k.lower(): v for k, v in (r.get("headers") or {}).items()}
-            cache = _resp_cache_usage(r.get("resp_body"))
-            out.append({
-                "idx": r.get("idx"),
-                "ts": r.get("ts"),
-                "path": r.get("path"),
-                "orig_model": r.get("orig_model"),
-                "sent_model": r.get("sent_model"),
-                "route": r.get("route"),
-                "route_reason": r.get("route_reason"),
-                "status": r.get("resp_status"),
-                "agent_id": (h.get("x-claude-code-agent-id") or "")[:12],
-                "session": (h.get("x-claude-code-session-id") or "")[:8],
-                "msgs": len(b.get("messages") or []),
-                "tools": len(b.get("tools") or []),
-                "stream": b.get("stream"),
-                "cache": cache,
-                "resp_error": r.get("resp_error"),
-                "has_custom_prompt": bool(r.get("custom_prompt")),
-                "stripped_banner": bool(r.get("stripped_banner")),
-            })
-        return {"calls": out, "total": len(out)}
+        return _calls_snapshot(n)
 
     def _call_detail(self):
         """单条完整内容(headers/body/响应)"""
@@ -1559,12 +1710,19 @@ class UIHandler(BaseHTTPRequestHandler):
         r = _find_record_by_idx(idx)
         if r:
             out = dict(r)
-            out["cache"] = _resp_cache_usage(r.get("resp_body"))
+            out["cache"] = r.get("cache") if r.get("cache") is not None else _resp_cache_usage(r.get("resp_body"))
             return out
         return {"error": "not found"}
 
     def do_GET(self):
-        if self.path.startswith("/api/config"):
+        if self.path.split("?")[0] == "/api/codex/login/status":
+            if not self._codex_login_allowed():
+                return
+            try:
+                self._json(get_codex_login().status())
+            except Exception:
+                self._json({"status": "error", "message": "无法读取 Codex 登录状态"}, 500)
+        elif self.path.startswith("/api/config"):
             try:
                 self._json(_config_public_view(load_conf()))
             except Exception as e:
@@ -1596,6 +1754,31 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path.split("?")[0] == "/api/codex/login":
+            if not self._codex_login_allowed(write=True):
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 1024 or self.headers.get("Transfer-Encoding"):
+                    raise ValueError("invalid login body size")
+            except ValueError:
+                self.close_connection = True
+                self._json({"error": "Invalid login request size"}, 400)
+                return
+            self.connection.settimeout(10)
+            try:
+                raw = self.rfile.read(length)
+                if len(raw) != length or not isinstance(json.loads(raw or b"{}"), dict):
+                    raise ValueError("invalid login body")
+            except (ValueError, OSError):
+                self.close_connection = True
+                self._json({"error": "Invalid login request"}, 400)
+                return
+            try:
+                self._json(get_codex_login().start())
+            except Exception:
+                self._json({"status": "error", "message": "无法启动 Codex 登录，请稍后重试"}, 500)
+            return
         ln = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(ln).decode() if ln else "{}"
         try:
@@ -1748,11 +1931,26 @@ class UIHandler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "unsupported upstream action"}, 400)
         elif p == "/api/reset":
-            try:
-                open(RECORDS, "w").close()
-            except Exception:
-                pass
-            self._json({"ok": True})
+            err = None
+            for attempt in range(5):
+                try:
+                    with LOCK:
+                        with open(RECORDS, "w", encoding="utf-8") as f:
+                            pass
+                        _IDX[0] = 0
+                        with _STATS_LOCK:
+                            _STATS_CACHE.update({"fingerprint": None, "rows": None, "total": 0})
+                        with _CALLS_LOCK:
+                            _CALLS_CACHE.clear()
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+                    time.sleep(0.05)
+            if err:
+                self._json({"error": f"清零记录失败: {err}"}, 500)
+            else:
+                self._json({"ok": True})
         elif p == "/api/prompts":
             tier = data.get("tier")
             custom_txt = data.get("custom")
@@ -1775,12 +1973,22 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_response(204); self.end_headers()
 
 
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Use Windows exclusive binding so a second relay instance cannot share a port."""
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        return super().server_bind()
+
+
 def serve_ui(conf):
     host = conf.get("listen_host", "127.0.0.1")
     if not is_loopback_host(host):
         raise ValueError(f"Refusing to bind UI to non-loopback host '{host}'.")
     port = conf.get("ui_port", 8610)
-    srv = ThreadingHTTPServer((host, port), UIHandler)
+    srv = ExclusiveThreadingHTTPServer((host, port), UIHandler)
     print(f"cc-relay UI on http://{host}:{port}")
     srv.serve_forever()
 
@@ -1791,7 +1999,7 @@ def serve(a):
     if not is_loopback_host(host):
         raise ValueError(f"Refusing to bind relay to non-loopback host '{host}'.")
     port = conf.get("listen_port", 8400)
-    srv = ThreadingHTTPServer((host, port), Relay)
+    srv = ExclusiveThreadingHTTPServer((host, port), Relay)
     srv.reload_conf = lambda: load_conf()
     # 同时起 UI (可选)
     if not a.no_ui:
